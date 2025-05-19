@@ -1,7 +1,7 @@
 #ifndef RDB_ROOT_CONFIG_HPP
 #define RDB_ROOT_CONFIG_HPP
 
-#include "rdb_memunits.hpp"
+#include <rdb_memunits.hpp>
 #include <filesystem>
 #include <thread>
 

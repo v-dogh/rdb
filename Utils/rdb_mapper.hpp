@@ -13,7 +13,7 @@
 #else
 #error(platform unsupported)
 #endif
-#include "rdb_utils.hpp"
+#include <rdb_utils.hpp>
 
 namespace rdb
 {

@@ -14,7 +14,7 @@
 #include <iomanip>
 #include <sstream>
 #include <memory>
-#include "rdb_keytype.hpp"
+#include <rdb_keytype.hpp>
 
 namespace rdb
 {

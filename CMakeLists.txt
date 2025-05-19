@@ -20,37 +20,64 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
 add_subdirectory(External/Snappy)
 add_executable(RDB main.cpp
-    rdb_root_config.hpp
-    rdb_keytype.hpp
-    rdb_writetype.hpp
-    rdb_qop.hpp
-    rdb_dsl.hpp
-    rdb_utils.hpp
-    rdb_shared_buffer.hpp
-    rdb_memunits.hpp
-    rdb_reflect.hpp
-    rdb_dbg.hpp
+    # Core
 
-    rdb_mount.hpp
-    rdb_schema.hpp
-    rdb_locale.hpp
-    rdb_memory.hpp
-    rdb_types.hpp
-    rdb_log.hpp
-    rdb_mapper.hpp
-
-    rdb_mount.cpp
-    rdb_schema.cpp
-    rdb_memory.cpp
-    rdb_log.cpp
-    rdb_mapper.cpp
-    rdb_network.hpp
-    rdb_utils.cpp
-    rdb_shared_buffer.cpp
-    rdb_reflect.cpp
     rdb_version.hpp
+    rdb_root_config.hpp
+    rdb_mount.hpp
+    rdb_mount.cpp
+
+    # Query
+
+    Query/rdb_qop.hpp
+    Query/rdb_dsl.hpp
+
+    # Memory
+
+    Memory/rdb_memory.hpp
+    Memory/rdb_memory.cpp
+    Memory/rdb_log.hpp
+    Memory/rdb_log.cpp
+    Memory/rdb_writetype.hpp
+
+    # Schema
+
+    Schema/rdb_schema.hpp
+    Schema/rdb_schema.cpp
+    Schema/rdb_reflect.hpp
+    Schema/rdb_reflect.cpp
+    Schema/rdb_keytype.hpp
+    Schema/rdb_types.hpp
+
+    # Network
+
+    Network/rdb_network.hpp
+    Network/rdb_oracle.hpp
+
+    # Utilities
+
+    Utils/rdb_utils.hpp
+    Utils/rdb_utils.cpp
+    Utils/rdb_shared_buffer.hpp
+    Utils/rdb_shared_buffer.cpp
+    Utils/rdb_mapper.hpp
+    Utils/rdb_mapper.cpp
+    Utils/rdb_locale.hpp
+    Utils/rdb_memunits.hpp
+    Utils/rdb_dbg.hpp
 )
 target_link_libraries(RDB PRIVATE snappy)
+
+target_include_directories(RDB
+    PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/External
+    ${CMAKE_SOURCE_DIR}/Memory
+    ${CMAKE_SOURCE_DIR}/Query
+    ${CMAKE_SOURCE_DIR}/Schema
+    ${CMAKE_SOURCE_DIR}/Network
+    ${CMAKE_SOURCE_DIR}/Utils
+)
 
 include(GNUInstallDirs)
 install(TARGETS RDB

@@ -1,5 +1,5 @@
-#include "rdb_shared_buffer.hpp"
-#include "External/XXHash/xxhash.hpp"
+#include <rdb_shared_buffer.hpp>
+#include <XXHash/xxhash.hpp>
 
 namespace rdb
 {

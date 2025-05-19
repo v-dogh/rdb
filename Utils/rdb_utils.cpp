@@ -1,6 +1,6 @@
-#include "rdb_utils.hpp"
-#include "External/XXHash/xxhash.hpp"
-#include "rdb_locale.hpp"
+#include <rdb_utils.hpp>
+#include <rdb_locale.hpp>
+#include <XXHash/xxhash.hpp>
 #include <cmath>
 #include <random>
 #include <thread>

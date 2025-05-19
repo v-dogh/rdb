@@ -5,9 +5,9 @@
 #include <cstring>
 #include <atomic>
 #include <span>
-#include "External/Snappy/snappy.h"
-#include "External/Snappy/snappy-sinksource.h"
-#include "rdb_memunits.hpp"
+#include <Snappy/snappy.h>
+#include <Snappy/snappy-sinksource.h>
+#include <rdb_memunits.hpp>
 
 namespace rdb
 {

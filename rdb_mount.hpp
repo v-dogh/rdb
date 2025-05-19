@@ -7,10 +7,10 @@
 #include <memory>
 #include <vector>
 #include <functional>
-#include "External/ConcurrentQueue/concurrentqueue.h"
-#include "rdb_memory.hpp"
-#include "rdb_root_config.hpp"
-#include "rdb_dsl.hpp"
+#include <ConcurrentQueue/concurrentqueue.h>
+#include <rdb_memory.hpp>
+#include <rdb_root_config.hpp>
+#include <rdb_dsl.hpp>
 
 namespace rdb
 {

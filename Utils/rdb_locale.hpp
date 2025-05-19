@@ -6,7 +6,7 @@
 #include <bit>
 #include <optional>
 #include <span>
-#include "rdb_utils.hpp"
+#include <rdb_utils.hpp>
 
 namespace rdb
 {

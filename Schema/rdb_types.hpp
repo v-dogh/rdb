@@ -1,8 +1,8 @@
 #ifndef RDB_TYPES_HPP
 #define RDB_TYPES_HPP
 
-#include "rdb_locale.hpp"
-#include "rdb_schema.hpp"
+#include <rdb_locale.hpp>
+#include <rdb_schema.hpp>
 
 namespace rdb::type
 {
