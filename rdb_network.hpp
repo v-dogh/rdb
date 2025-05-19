@@ -1,0 +1,4 @@
+#ifndef RDB_NETWORK_HPP
+#define RDB_NETWORK_HPP
+
+#endif // RDB_NETWORK_HPP
