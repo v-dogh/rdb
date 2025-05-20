@@ -1,8 +1,8 @@
-#ifndef RDB_TYPES_HPP
-#define RDB_TYPES_HPP
+#ifndef RDB_SCALAR_HPP
+#define RDB_SCALAR_HPP
 
-#include <rdb_locale.hpp>
 #include <rdb_schema.hpp>
+#include <rdb_locale.hpp>
 
 namespace rdb::type
 {
@@ -16,12 +16,7 @@ namespace rdb::type
 		{
 			return sizeof(Scalar);
 		}
-		static auto minline(std::span<unsigned char> view) noexcept
-		{
-			new (view.data()) Scalar{};
-			return sizeof(Scalar);
-		}
-		static auto minline(Type value, std::span<unsigned char> view) noexcept
+		static auto minline(std::span<unsigned char> view, Type value = {}) noexcept
 		{
 			new (view.data()) Scalar(value);
 			return sizeof(Scalar);
@@ -66,17 +61,18 @@ namespace rdb::type
 			return _value;
 		}
 
-		View view() const noexcept
+		void view(View view) const noexcept
 		{
-			const auto beg = reinterpret_cast<const unsigned char*>(this);
-			const auto end = beg + storage();
+			const auto* beg = reinterpret_cast<const unsigned char*>(this);
+			const auto* end = beg + storage();
+			const auto tv = TypedView<Scalar>::view(view.mutate());
 			if constexpr (byte::is_storage_endian())
 			{
-				return View::view(std::span(beg, end));
+				tv->_value = _value;
 			}
 			else
 			{
-				return make(byte::byteswap(_value));
+				tv = byte::byteswap(_value);
 			}
 		}
 		key_type hash() const noexcept
@@ -88,6 +84,10 @@ namespace rdb::type
 			));
 		}
 
+		static constexpr std::size_t static_storage() noexcept
+		{
+			return sizeof(Type);
+		}
 		constexpr std::size_t storage() const noexcept
 		{
 			return sizeof(Type);
@@ -128,56 +128,6 @@ namespace rdb::type
 	using Int64 = Scalar<"i64", std::uint64_t>;
 
 	using Byte = Uint8;
-
-	template<typename... Ts>
-	class Tuple : public Interface<
-		Tuple<Ts...>,
-		cmp::concat_const_string<"t", Ts::uname...>(),
-		(Ts::udynamic || ...)
-	>
-	{
-	private:
-		alignas(std::max({ alignof(Ts)... }))
-			std::array<unsigned char, (Tuple::udynamic ? 0 : (sizeof(Ts) + ...))> buffer;
-	public:
-		View view() const noexcept
-		{
-
-		}
-		key_type hash() const noexcept
-		{
-
-		}
-
-		constexpr std::size_t storage() const noexcept
-		{
-			if constexpr (Tuple::udynamic)
-			{
-
-			}
-			else
-			{
-				return (sizeof(Ts) + ...);
-			}
-		}
-		std::string print() const noexcept
-		{
-			return "";
-		}
-
-		wproc_query_result wproc(proc_opcode opcode, proc_param arguments, wproc_query query) noexcept
-		{
-
-		}
-		rproc_result rproc(proc_opcode, proc_param) const noexcept
-		{
-
-		}
-		bool fproc(proc_opcode opcode, proc_param arguments) const noexcept
-		{
-
-		}
-	};
 
 	// template<cmp::ConstString UniqueName, typename Type> requires std::is_trivial_v<Type>
 	// class Buffer : public Interface<Buffer<UniqueName, Type>, UniqueName, true>
@@ -332,4 +282,4 @@ namespace rdb::type
 	// };
 }
 
-#endif // RDB_TYPES_HPP
+#endif // RDB_SCALAR_HPP

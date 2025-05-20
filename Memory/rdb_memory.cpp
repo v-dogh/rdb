@@ -326,6 +326,8 @@ namespace rdb
 	{
 		RDB_FMT("VCPU{} MC READ <{}>", _id, uuid::encode(key, uuid::table_alnum))
 
+		std::size_t field = 0;
+
 		// Search cache
 		{			
 			if (auto result = _read_cache_impl(

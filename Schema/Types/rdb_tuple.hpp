@@ -1,0 +1,264 @@
+#ifndef RDB_TUPLE_HPP
+#define RDB_TUPLE_HPP
+
+#include <rdb_schema.hpp>
+#include <rdb_locale.hpp>
+
+namespace rdb::type
+{
+	template<typename... Ts>
+	class alignas(std::max({ alignof(Ts)... })) Tuple : public Interface<
+		Tuple<Ts...>,
+		cmp::concat_const_string<"t<", Ts::cuname..., ">">(),
+		(Ts::udynamic || ...)
+	>
+	{
+	private:
+		template<typename Type>
+		const auto* _at(std::size_t off) const noexcept
+		{
+			return static_cast<const Type*>(
+				reinterpret_cast<const unsigned char*>(this) + off
+			);
+		}
+		template<typename Type>
+		auto* _at(std::size_t off) noexcept
+		{
+			return static_cast<Type*>(
+				reinterpret_cast<unsigned char*>(this) + off
+			);
+		}
+
+		template<typename Type>
+		std::span<const unsigned char> _at_view(std::size_t off) const noexcept
+		{
+			const auto* begin = reinterpret_cast<const unsigned char*>(this) + off;
+			const auto* ptr = static_cast<const Type*>(
+				begin
+			);
+			return std::span(begin, begin + ptr->storage());
+		}
+		template<typename Type>
+		std::span<unsigned char> _at_view(std::size_t off) noexcept
+		{
+			auto* begin = reinterpret_cast<unsigned char*>(this) + off;
+			auto* ptr = static_cast<Type*>(
+				begin
+			);
+			return std::span(begin, begin + ptr->storage());
+		}
+
+		template<std::size_t Idx, typename Type, typename... Rest>
+		struct TypeAtImpl
+		{
+			using type = TypeAtImpl<Idx - 1, Rest...>::type;
+		};
+		template<typename Type, typename... Rest>
+		struct TypeAtImpl<0, Type, Rest...>
+		{
+			using type = Type;
+		};
+
+		template<std::size_t Idx>
+		struct TypeAt
+		{
+			using type = TypeAtImpl<Idx, Ts...>::type;
+		};
+
+		template<std::size_t Idx, std::size_t Off, typename Type, typename... Rest>
+		struct StaticOffsetImpl
+		{
+			static constexpr auto offset = StaticOffsetImpl<
+				Idx - 1, Off + Type::static_storage(), Rest...
+			>::offset;
+		};
+		template<std::size_t Off, typename Type, typename... Rest>
+		struct StaticOffsetImpl<0, Off, Type, Rest...>
+		{
+			static constexpr auto offset = Off;
+		};
+
+		template<std::size_t Idx>
+		struct StaticOffset
+		{
+			static constexpr auto offset = StaticOffsetImpl<Idx, 0, Ts...>::offset;
+		};
+
+		template<std::size_t Idx>
+		constexpr std::size_t _offset_of() const noexcept
+		{
+			if constexpr (Tuple::udynamic)
+			{
+				std::size_t off = 0;
+				[&]<std::size_t... Idv>(std::index_sequence<Idv...>) {
+					((off += _at<typename TypeAt<Idv>::type>(off)->storage()), ...);
+				}(std::make_index_sequence<Idx>());
+				return off;
+			}
+			else
+			{
+				return StaticOffset<Idx>::offset;
+			}
+		}
+	public:
+		template<typename... Argv>
+		static auto mstorage(const Argv&... args) noexcept
+		{
+			static_assert(sizeof...(Argv) == sizeof...(Ts), "Tuple must be either default-initialized or have all elements initialized");
+			return (Ts::mstorage(args) + ...);
+		}
+		static auto mstorage() noexcept
+		{
+			return (Ts::mstorage() + ...);
+		}
+		template<typename... Argv>
+		static auto minline(std::span<unsigned char> view, Argv&&... args) noexcept
+		{
+			static_assert(sizeof...(Argv) == sizeof...(Ts), "Tuple must be either default-initialized or have all elements initialized");
+			new (view.data()) Tuple{ std::forward<Argv>(args)... };
+			return mstorage(args...);
+		}
+		template<typename... Argv>
+		static auto make(Argv&&... args) noexcept
+		{
+			static_assert(sizeof...(Argv) == sizeof...(Ts), "Tuple must be either default-initialized or have all elements initialized");
+			auto view = TypedView<Tuple>::copy(mstorage(args...));
+			new (view.mutate().data()) Tuple(std::forward<Argv>(args)...);
+			return view;
+		}
+
+		Tuple()
+		{
+			std::size_t off = 0;
+			return ([&]() {
+				off += Ts::minline(_at_view<Ts>(off));
+			}(), ...);
+		}
+		template<typename... Argv>
+		Tuple(Argv&&... args)
+		{
+			std::size_t off = 0;
+			return ([&]() {
+				off += Ts::minline(args, _at_view<Ts>(off));
+			}(), ...);
+		}
+
+		enum rOp : proc_opcode
+		{
+			// Get + N is equivalent to a read of tuple.field<N>()
+			Get = 0
+		};
+		enum wOp : proc_opcode
+		{
+			// Set + N is equivalent to a write to tuple.field<N>()
+			Set = 0
+		};
+		enum fOp : proc_opcode
+		{
+			Smaller = proc_opcode(SortFilterOp::Smaller),
+			Larger = proc_opcode(SortFilterOp::Larger),
+			Equal = proc_opcode(SortFilterOp::Equal),
+		};
+
+		template<wOp Op>
+		struct ReadPair
+		{
+			using param = void;
+			using result = TypeAt<std::size_t(Op)>;
+		};
+		template<wOp Op>
+		struct WritePair
+		{
+			using param = TypeAt<std::size_t(Op)>;
+		};
+		template<fOp Op>
+		struct FilterPair
+		{
+			using param = Tuple;
+		};
+
+		void view(View view) const noexcept
+		{
+			if constexpr (byte::is_storage_endian())
+			{
+				std::memcpy(view.mutate().data(), this, storage());
+			}
+			else
+			{
+				std::size_t off = 0;
+				([&]() {
+					off += _at<Ts>(off)->storage();
+					_at<Ts>(off)->view(View::subview(off));
+				}(), ...);
+			}
+		}
+		key_type hash() const noexcept
+		{
+			std::size_t off = 0;
+			return uuid::xxhash_combine({
+				[&]() {
+					off += _at<Ts>(off)->storage();
+					return _at<Ts>(off)->hash();
+				}...
+			});
+		}
+
+		template<std::size_t Idx>
+		auto field() const noexcept
+		{
+			static_assert(Idx < sizeof...(Ts), "Invalid index");
+			using type = TypeAt<Idx>::type;
+			return TypedView<type>::view(
+				_at_view<type>(_offset_of<Idx>())
+			);
+		}
+		template<std::size_t Idx>
+		auto field() noexcept
+		{
+			static_assert(Idx < sizeof...(Ts), "Invalid index");
+			using type = TypeAt<Idx>::type;
+			return TypedView<type>::view(
+				_at_view<type>(_offset_of<Idx>())
+			);
+		}
+
+		static constexpr std::size_t static_storage() noexcept
+		{
+			if constexpr (!(Ts::udynamic || ...))
+				return (Ts::static_storage() + ...);
+			else
+				static_assert(false, "Type is dynamic");
+		}
+		constexpr std::size_t storage() const noexcept
+		{
+			if constexpr (Tuple::udynamic)
+			{
+				std::size_t off = 0;
+				return ((off += _at<Ts>(off)->storage()), ...);
+			}
+			else
+			{
+				return (Ts::static_storage() + ...);
+			}
+		}
+		std::string print() const noexcept
+		{
+			return "";
+		}
+
+		wproc_query_result wproc(proc_opcode opcode, proc_param arguments, wproc_query query) noexcept
+		{
+
+		}
+		rproc_result rproc(proc_opcode, proc_param) const noexcept
+		{
+
+		}
+		bool fproc(proc_opcode opcode, proc_param arguments) const noexcept
+		{
+
+		}
+	};
+}
+
+#endif // RDB_TUPLE_HPP

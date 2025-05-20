@@ -44,17 +44,17 @@ namespace rdb
 		template<ConstString... Str>
 		constexpr auto concat_const_string() noexcept
 		{
-			ConstString<(Str.data.size() + ...)> result;
+			ConstString<((Str.data.size() - 1) + ...) + 1> result;
 
 			std::size_t off = 0;
 			([&]<ConstString Cur>()
 			{
 				std::copy(
 					Cur.data.begin(),
-					Cur.data.end(),
+					Cur.data.end() - 1,
 					result.data.begin() + off
 				);
-				off += Cur.data.size();
+				off += Cur.data.size() - 1;
 			}.template operator()<Str>(), ...);
 
 			return result;
@@ -289,14 +289,7 @@ namespace rdb
 		static auto view(const StackView& data) noexcept
 		{
 			StackView view;
-			if (std::holds_alternative<std::span<const unsigned char>>(data._data))
-			{
-				view._data = data.data();
-			}
-			else
-			{
-				view._data = data.data();
-			}
+			view._data = data.data();
 			return view;
 		}
 		static auto view(std::span<unsigned char> data) noexcept
@@ -368,6 +361,22 @@ namespace rdb
 		std::span<unsigned char> mutate() noexcept
 		{
 			return _mutate_impl();
+		}
+
+		StackView subview(std::size_t off, std::size_t length = ~0ull) const noexcept
+		{
+			return view(data().subspan(off, length));
+		}
+		StackView subview(std::size_t off, std::size_t length = ~0ull) noexcept
+		{
+			if (std::holds_alternative<std::span<const unsigned char>>(_data))
+			{
+				return view(data().subspan(off, length));
+			}
+			else
+			{
+				return view(mutate().subspan(off, length));
+			}
 		}
 
 		auto begin() const noexcept
