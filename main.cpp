@@ -72,5 +72,5 @@ int main()
 	>;
 
 	rdb::TypedView<type> value = type::make(123, 456);
-	std::cout << value->print() << std::endl;
+	std::cout << value->uname << ": " << value->print() << std::endl;
 }

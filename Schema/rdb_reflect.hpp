@@ -24,11 +24,11 @@ namespace rdb
 	enum wproc_type : wproc_query_result
 	{
 		// Storage stays constant
-		Static = 1 << 0,
+		Static,
 		// Storage changes
-		Dynamic = 1 << 1,
-
-		Default = Static
+		Dynamic,
+		// Writes only a delta
+		Delta
 	};
 	enum wproc_status : wproc_query_result
 	{
@@ -55,6 +55,108 @@ namespace rdb
 		Descending
 	};
 
+	class AccumulatorHandle
+	{
+	public:
+		enum class Type
+		{
+			Delta,
+			Root
+		};
+	private:
+		void* _state{ nullptr };
+		View(*_consume)(void*, View, Type){ nullptr };
+		void(*_destroy_state)(void*){ nullptr };
+	public:
+		template<typename State>
+		static AccumulatorHandle make() noexcept
+		{
+			AccumulatorHandle handle;
+			if constexpr (std::is_default_constructible_v<State>)
+			{
+				handle._consume = [](void* ptr, View view, Type type) -> View {
+					return State::consume(View::view(view), type);
+				};
+			}
+			else
+			{
+				handle._consume = [](void* ptr, View view, Type type) -> View {
+					return static_cast<State*>(ptr)->consume(View::view(view), type);
+				};
+				handle._state = new State;
+				handle._destroy_state = [](void* ptr) {
+					delete static_cast<State*>(ptr);
+				};
+			}
+			return handle;
+		}
+
+		AccumulatorHandle() = default;
+		~AccumulatorHandle()
+		{
+			if (_state)
+				_destroy_state(_state);
+		}
+
+		View consume(View data, Type type) noexcept
+		{
+			return _consume(_state, View::view(data), type);
+		}
+	};
+	class CompressorHandle
+	{
+	private:
+		void* _state{ nullptr };
+		View(*_compress)(void*, View){ nullptr };
+		void(*_consume_for_compression)(void*, View){ nullptr };
+		void(*_destroy_state)(void*){ nullptr };
+	public:
+		template<typename State>
+		static CompressorHandle make() noexcept
+		{
+			CompressorHandle handle;
+			if constexpr (std::is_default_constructible_v<State>)
+			{
+				handle._consume_for_compression = [](void* ptr, View view) {
+					State::consume(View::view(view));
+				};
+				handle._compress = [](void* ptr, View view) -> View {
+					return State::compress(View::view(view));
+				};
+			}
+			else
+			{
+				handle._consume_for_compression = [](void* ptr, View view) {
+					static_cast<State*>(ptr)->consume(View::view(view));
+				};
+				handle._compress = [](void* ptr, View view) -> View {
+					return static_cast<State*>(ptr)->compress(View::view(view));
+				};
+				handle._state = new State;
+				handle._destroy_state = [](void* ptr) {
+					delete static_cast<State*>(ptr);
+				};
+			}
+			return handle;
+		}
+
+		CompressorHandle() = default;
+		~CompressorHandle()
+		{
+			if (_state)
+				_destroy_state(_state);
+		}
+
+		void consume(View data) noexcept
+		{
+			_consume_for_compression(_state, View::view(data));
+		}
+		View compress(View data) noexcept
+		{
+			return _compress(_state, View::view(data));
+		}
+	};
+
 	class RuntimeInterfaceReflection
 	{
 	public:
@@ -67,6 +169,9 @@ namespace rdb
 			wproc_query_result(*wproc)(void*, proc_opcode, proc_param, wproc_query);
 			rproc_result(*rproc)(const void*, proc_opcode, proc_param);
 			bool(*fproc)(const void*, proc_opcode, proc_param);
+			bool(*fragmented)();
+			AccumulatorHandle(*accumulate)(){ nullptr };
+			AccumulatorHandle(*compress)(){ nullptr };
 		};
 	private:
 		static inline std::unordered_map<std::size_t, RTII> _interface_info{};

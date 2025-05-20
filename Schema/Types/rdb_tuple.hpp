@@ -81,6 +81,31 @@ namespace rdb::type
 			static constexpr auto offset = StaticOffsetImpl<Idx, 0, Ts...>::offset;
 		};
 
+		template<std::size_t... Idv>
+		View _field_impl(std::size_t idx, std::index_sequence<Idv...> = std::make_index_sequence<sizeof...(Ts)>()) const noexcept
+		{
+			static std::array table{
+				+[](Tuple* tuple) {
+					return tuple->_at_view<TypeAt<Idv>>(
+						tuple->_offset_of<Idv>()
+					);
+				}...
+			};
+			return table[idx](this);
+		}
+		template<std::size_t... Idv>
+		View _field_impl(std::size_t idx, std::index_sequence<Idv...> = std::make_index_sequence<sizeof...(Ts)>()) noexcept
+		{
+			static std::array table{
+				+[](Tuple* tuple) {
+					return tuple->_at_view<TypeAt<Idv>>(
+						tuple->_offset_of<Idv>()
+					);
+				}...
+			};
+			return table[idx](this);
+		}
+
 		template<std::size_t Idx>
 		constexpr std::size_t _offset_of() const noexcept
 		{
@@ -220,6 +245,15 @@ namespace rdb::type
 			);
 		}
 
+		View field(std::size_t idx) const noexcept
+		{
+			return _field_impl(idx);
+		}
+		View field(std::size_t idx) noexcept
+		{
+			return _field_impl(idx);
+		}
+
 		static constexpr std::size_t static_storage() noexcept
 		{
 			if constexpr (!(Ts::udynamic || ...))
@@ -267,9 +301,12 @@ namespace rdb::type
 		{
 
 		}
-		rproc_result rproc(proc_opcode, proc_param) const noexcept
+		rproc_result rproc(proc_opcode opcode, proc_param) const noexcept
 		{
-
+			if (opcode > rOp::Get)
+			{
+				return field(opcode - rOp::Get);
+			}
 		}
 		bool fproc(proc_opcode opcode, proc_param arguments) const noexcept
 		{

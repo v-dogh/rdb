@@ -136,7 +136,7 @@ namespace rdb
 		static constexpr auto sort_order = KeyOrdering<Idx>::order;
 	};
 
-	template<typename Type, cmp::ConstString UniqueName, bool Dynamic = false>
+	template<typename Type, cmp::ConstString UniqueName, bool Dynamic = false, bool Fragmented = false, typename Accumulator = void, typename Compressor = void>
 	struct Interface
 	{
 	public:
@@ -153,7 +153,10 @@ namespace rdb
 				[]() { return sizeof(Type); },
 				[](void* ptr, proc_opcode o, proc_param p, wproc_query q) { return static_cast<Type*>(ptr)->wproc(o, proc_param::view(p), q); },
 				[](const void* ptr, proc_opcode o, proc_param p) { return static_cast<const Type*>(ptr)->rproc(o, proc_param::view(p)); },
-				[](const void* ptr, proc_opcode o, proc_param p) { return static_cast<const Type*>(ptr)->fproc(o, proc_param::view(p)); }
+				[](const void* ptr, proc_opcode o, proc_param p) { return static_cast<const Type*>(ptr)->fproc(o, proc_param::view(p)); },
+				[]() { return Fragmented; },
+				[]() { return AccumulatorHandle::make<Accumulator>(); },
+				[]() { return CompressorHandle::make<Compressor>(); }
 			});
 		}
 	protected:
