@@ -3,6 +3,7 @@
 
 #include <rdb_schema.hpp>
 #include <rdb_locale.hpp>
+#include <sstream>
 
 namespace rdb::type
 {
@@ -17,14 +18,14 @@ namespace rdb::type
 		template<typename Type>
 		const auto* _at(std::size_t off) const noexcept
 		{
-			return static_cast<const Type*>(
+			return reinterpret_cast<const Type*>(
 				reinterpret_cast<const unsigned char*>(this) + off
 			);
 		}
 		template<typename Type>
 		auto* _at(std::size_t off) noexcept
 		{
-			return static_cast<Type*>(
+			return reinterpret_cast<Type*>(
 				reinterpret_cast<unsigned char*>(this) + off
 			);
 		}
@@ -33,18 +34,14 @@ namespace rdb::type
 		std::span<const unsigned char> _at_view(std::size_t off) const noexcept
 		{
 			const auto* begin = reinterpret_cast<const unsigned char*>(this) + off;
-			const auto* ptr = static_cast<const Type*>(
-				begin
-			);
+			const auto* ptr = reinterpret_cast<const Type*>(begin);
 			return std::span(begin, begin + ptr->storage());
 		}
 		template<typename Type>
 		std::span<unsigned char> _at_view(std::size_t off) noexcept
 		{
 			auto* begin = reinterpret_cast<unsigned char*>(this) + off;
-			auto* ptr = static_cast<Type*>(
-				begin
-			);
+			auto* ptr = reinterpret_cast<Type*>(begin);
 			return std::span(begin, begin + ptr->storage());
 		}
 
@@ -138,8 +135,8 @@ namespace rdb::type
 		Tuple(Argv&&... args)
 		{
 			std::size_t off = 0;
-			return ([&]() {
-				off += Ts::minline(args, _at_view<Ts>(off));
+			([&]() {
+				off += Ts::minline(_at_view<Ts>(off), args);
 			}(), ...);
 		}
 
@@ -187,8 +184,8 @@ namespace rdb::type
 			{
 				std::size_t off = 0;
 				([&]() {
-					off += _at<Ts>(off)->storage();
 					_at<Ts>(off)->view(View::subview(off));
+					off += _at<Ts>(off)->storage();
 				}(), ...);
 			}
 		}
@@ -197,8 +194,9 @@ namespace rdb::type
 			std::size_t off = 0;
 			return uuid::xxhash_combine({
 				[&]() {
+					const auto h = _at<Ts>(off)->hash();
 					off += _at<Ts>(off)->storage();
-					return _at<Ts>(off)->hash();
+					return h;
 				}...
 			});
 		}
@@ -243,7 +241,26 @@ namespace rdb::type
 		}
 		std::string print() const noexcept
 		{
-			return "";
+			std::stringstream out;
+
+			out << "[ ";
+
+			std::size_t off = 0;
+			std::size_t idx = 0;
+			([&]() {
+				if (off != 0)
+					out << ", ";
+				out << "<";
+				out << idx++;
+				out << ">: '";
+				out << _at<Ts>(off)->print();
+				out << '\'';
+				off += _at<Ts>(off)->storage();
+			}(), ...);
+
+			out << " ]";
+
+			return out.str();
 		}
 
 		wproc_query_result wproc(proc_opcode opcode, proc_param arguments, wproc_query query) noexcept

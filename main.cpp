@@ -71,6 +71,6 @@ int main()
 		rdbt::Uint32
 	>;
 
-	rdb::TypedView<type> value = type::make(0, 0);
-	value->field<1>()->value();
+	rdb::TypedView<type> value = type::make(123, 456);
+	std::cout << value->print() << std::endl;
 }
