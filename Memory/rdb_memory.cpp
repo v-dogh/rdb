@@ -519,7 +519,7 @@ namespace rdb
 													RDB_TRACE("VCPU{} MC READ FOUND VALUE", _id)
 
 													if (block[off] == char(DataType::Tombstone))
-														return nullptr;
+														return result();
 
 													if ((found += _read_entry_impl(
 															View::view(block.subspan(off)), fields, views
@@ -612,7 +612,7 @@ namespace rdb
 										RDB_TRACE("VCPU{} MC READ FOUND VALUE", _id)
 
 										if (block[off] == char(DataType::Tombstone))
-											return nullptr;
+											return result();
 
 										if ((found += _read_entry_impl(
 												View::view(block.subspan(off)), fields, views

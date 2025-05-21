@@ -42,7 +42,7 @@ namespace rdb
 		// Returns a host-order view of the bytes of the interface
 		// I.e. if the order is not host, the implementation has to perform a byteswap (the view then holds dynamic data)
 		{ v.view() } -> std::same_as<View>;
-		{ v.view(std::declval<View>()) } -> std::same_as<void>;
+		{ v.place_view(std::declval<View>()) } -> std::same_as<void>;
 		// Returns the ammount of storage required by the type
 		// E.g. a string might return it's length + the header
 		{ v.storage() } -> std::same_as<std::size_t>;
@@ -178,7 +178,7 @@ namespace rdb
 		View view() const noexcept
 		{
 			View view = View::copy(static_cast<const Type*>(this)->storage());
-			static_cast<const Type*>(this)->view(View::view(view.mutate()));
+			static_cast<const Type*>(this)->place_view(View::view(view.mutate()));
 			return view;
 		}
 	};

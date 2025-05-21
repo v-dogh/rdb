@@ -7,6 +7,14 @@
 
 namespace rdb::type
 {
+	template<typename... Argv>
+	struct MakeTuple
+	{
+		std::tuple<Argv...> data;
+		MakeTuple(Argv&&... args)
+			: data(std::forward_as_tuple(std::forward<Argv>(args)...)) {}
+	};
+
 	template<typename... Ts>
 	class alignas(std::max({ alignof(Ts)... })) Tuple : public Interface<
 		Tuple<Ts...>,
@@ -82,28 +90,28 @@ namespace rdb::type
 		};
 
 		template<std::size_t... Idv>
-		View _field_impl(std::size_t idx, std::index_sequence<Idv...> = std::make_index_sequence<sizeof...(Ts)>()) const noexcept
+		View _field_impl(std::size_t idx, std::index_sequence<Idv...>) const noexcept
 		{
 			static std::array table{
-				+[](Tuple* tuple) {
-					return tuple->_at_view<TypeAt<Idv>>(
+				+[](const Tuple* tuple) {
+					return tuple->_at_view<typename TypeAt<Idv>::type>(
 						tuple->_offset_of<Idv>()
 					);
 				}...
 			};
-			return table[idx](this);
+			return View::view(table[idx](this));
 		}
 		template<std::size_t... Idv>
-		View _field_impl(std::size_t idx, std::index_sequence<Idv...> = std::make_index_sequence<sizeof...(Ts)>()) noexcept
+		View _field_impl(std::size_t idx, std::index_sequence<Idv...>) noexcept
 		{
 			static std::array table{
 				+[](Tuple* tuple) {
-					return tuple->_at_view<TypeAt<Idv>>(
+					return tuple->_at_view<typename TypeAt<Idv>::type>(
 						tuple->_offset_of<Idv>()
 					);
 				}...
 			};
-			return table[idx](this);
+			return View::view(table[idx](this));
 		}
 
 		template<std::size_t Idx>
@@ -129,30 +137,51 @@ namespace rdb::type
 			static_assert(sizeof...(Argv) == sizeof...(Ts), "Tuple must be either default-initialized or have all elements initialized");
 			return (Ts::mstorage(args) + ...);
 		}
+		template<typename... Argv>
+		static auto mstorage(const MakeTuple<Argv...>& args) noexcept
+		{
+			return std::apply([](const auto&... args) {
+				return (Ts::mstorage(args) + ...);
+			}, args.data);
+		}
 		static auto mstorage() noexcept
 		{
 			return (Ts::mstorage() + ...);
 		}
+
 		template<typename... Argv>
 		static auto minline(std::span<unsigned char> view, Argv&&... args) noexcept
 		{
-			static_assert(sizeof...(Argv) == sizeof...(Ts), "Tuple must be either default-initialized or have all elements initialized");
 			new (view.data()) Tuple{ std::forward<Argv>(args)... };
 			return mstorage(args...);
 		}
 		template<typename... Argv>
+		static auto minline(std::span<unsigned char> view, MakeTuple<Argv...> args) noexcept
+		{
+			return std::apply([&](auto&&... args) {
+				return minline(view, std::forward<Argv>(args)...);
+			}, args.data);
+		}
+
+		template<typename... Argv>
 		static auto make(Argv&&... args) noexcept
 		{
-			static_assert(sizeof...(Argv) == sizeof...(Ts), "Tuple must be either default-initialized or have all elements initialized");
 			auto view = TypedView<Tuple>::copy(mstorage(args...));
 			new (view.mutate().data()) Tuple(std::forward<Argv>(args)...);
 			return view;
+		}
+		template<typename... Argv>
+		static auto make(MakeTuple<Argv...> args) noexcept
+		{
+			return std::apply([](auto&&... args) {
+				return make(std::forward<Argv>(args)...);
+			}, args.data);
 		}
 
 		Tuple()
 		{
 			std::size_t off = 0;
-			return ([&]() {
+			([&]() {
 				off += Ts::minline(_at_view<Ts>(off));
 			}(), ...);
 		}
@@ -199,7 +228,7 @@ namespace rdb::type
 			using param = Tuple;
 		};
 
-		void view(View view) const noexcept
+		void place_view(View view) const noexcept
 		{
 			if constexpr (byte::is_storage_endian())
 			{
@@ -209,7 +238,7 @@ namespace rdb::type
 			{
 				std::size_t off = 0;
 				([&]() {
-					_at<Ts>(off)->view(View::subview(off));
+					_at<Ts>(off)->place_view(View::subview(off));
 					off += _at<Ts>(off)->storage();
 				}(), ...);
 			}
@@ -218,11 +247,11 @@ namespace rdb::type
 		{
 			std::size_t off = 0;
 			return uuid::xxhash_combine({
-				[&]() {
+				[&]() -> hash_type {
 					const auto h = _at<Ts>(off)->hash();
 					off += _at<Ts>(off)->storage();
 					return h;
-				}...
+				}()...
 			});
 		}
 
@@ -247,11 +276,11 @@ namespace rdb::type
 
 		View field(std::size_t idx) const noexcept
 		{
-			return _field_impl(idx);
+			return _field_impl(idx, std::make_index_sequence<sizeof...(Ts)>());
 		}
 		View field(std::size_t idx) noexcept
 		{
-			return _field_impl(idx);
+			return _field_impl(idx, std::make_index_sequence<sizeof...(Ts)>());
 		}
 
 		static constexpr std::size_t static_storage() noexcept

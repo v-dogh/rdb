@@ -327,10 +327,13 @@ namespace rdb
 		}
 		static auto copy(std::span<const StackView> data) noexcept
 		{
+			const auto size = std::accumulate(data.begin(), data.end(), std::size_t(0),
+				[](std::size_t ctr, const auto& v) { return ctr + v.size(); }
+			);
+			if (size == 0)
+				return StackView(nullptr);
 			StackView result = copy(
-				std::accumulate(data.begin(), data.end(), std::size_t(0),
-					[](std::size_t ctr, const auto& v) { return ctr + v.size(); }
-				)
+				size
 			);
 
 			std::size_t off = 0;

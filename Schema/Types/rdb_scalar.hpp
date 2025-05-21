@@ -61,7 +61,7 @@ namespace rdb::type
 			return _value;
 		}
 
-		void view(View view) const noexcept
+		void place_view(View view) const noexcept
 		{
 			const auto* beg = reinterpret_cast<const unsigned char*>(this);
 			const auto* end = beg + storage();

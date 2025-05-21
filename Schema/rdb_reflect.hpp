@@ -73,11 +73,14 @@ namespace rdb
 		static AccumulatorHandle make() noexcept
 		{
 			AccumulatorHandle handle;
-			if constexpr (std::is_default_constructible_v<State>)
+			if constexpr (!std::is_default_constructible_v<State>)
 			{
-				handle._consume = [](void* ptr, View view, Type type) -> View {
-					return State::consume(View::view(view), type);
-				};
+				if constexpr (!std::is_void_v<State>)
+				{
+					handle._consume = [](void* ptr, View view, Type type) -> View {
+						return State::consume(View::view(view), type);
+					};
+				}
 			}
 			else
 			{
@@ -116,14 +119,17 @@ namespace rdb
 		static CompressorHandle make() noexcept
 		{
 			CompressorHandle handle;
-			if constexpr (std::is_default_constructible_v<State>)
+			if constexpr (!std::is_default_constructible_v<State>)
 			{
-				handle._consume_for_compression = [](void* ptr, View view) {
-					State::consume(View::view(view));
-				};
-				handle._compress = [](void* ptr, View view) -> View {
-					return State::compress(View::view(view));
-				};
+				if constexpr (!std::is_void_v<State>)
+				{
+					handle._consume_for_compression = [](void* ptr, View view) {
+						State::consume(View::view(view));
+					};
+					handle._compress = [](void* ptr, View view) -> View {
+						return State::compress(View::view(view));
+					};
+				}
 			}
 			else
 			{
@@ -172,7 +178,7 @@ namespace rdb
 			bool(*fproc)(const void*, proc_opcode, proc_param);
 			bool(*fragmented)();
 			AccumulatorHandle(*accumulate)(){ nullptr };
-			AccumulatorHandle(*compress)(){ nullptr };
+			CompressorHandle(*compress)(){ nullptr };
 		};
 	private:
 		static inline std::unordered_map<std::size_t, RTII> _interface_info{};
