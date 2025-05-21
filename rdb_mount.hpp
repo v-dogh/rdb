@@ -74,11 +74,14 @@ namespace rdb
 				QueryEngine::ReadChainStore::ptr ptr
 			) : response(res), store(std::move(ptr)) {}
 
-			void push(View view, ParserInfo info) noexcept
+			View push(View view, ParserInfo info) noexcept
 			{
 				while (push_spinlock.test_and_set(std::memory_order::acquire));
-				response.emplace_back(info, View::copy(std::move(view)));
+				auto res = View::view(
+					response.emplace_back(info, View::copy(std::move(view))).second
+				);
 				push_spinlock.clear(std::memory_order::release);
+				return res;
 			}
 			void wait() const noexcept
 			{

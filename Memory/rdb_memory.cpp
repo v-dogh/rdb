@@ -278,7 +278,7 @@ namespace rdb
 		else
 			return sizeof(DataType);
 	}
-	std::size_t MemoryCache::_read_entry_impl(View view, field_bitmap& fields, std::span<View> out, bool is_primary) noexcept
+	std::size_t MemoryCache::_read_entry_impl(View view, field_bitmap& fields, const read_callback& callback) noexcept
 	{
 		RuntimeSchemaReflection::RTSI& info =
 			RuntimeSchemaReflection::info(_schema);
@@ -298,10 +298,7 @@ namespace rdb
 				{
 					fields.reset(field);
 					cnt++;
-					out[field] =
-						is_primary ?
-							View::view(view.data().subspan(beg, off - beg)) :
-							View::view(view.data().subspan(beg, off - beg));
+					callback(field, View::view(view.data().subspan(beg, off - beg)));
 				}
 			} while (off < view.size());
 		}
@@ -320,25 +317,22 @@ namespace rdb
 				{
 					fields.reset(idx);
 					cnt++;
-					out[idx] =
-						is_primary ?
-							View::view(view.data().subspan(beg, off - beg)) :
-							View::view(view.data().subspan(beg, off - beg));
+					callback(idx, View::view(view.data().subspan(beg, off - beg)));
 				}
 				idx++;
 			}
 		}
 		return cnt;
 	}
-	std::size_t MemoryCache::_read_cache_impl(const write_store& map, hash_type key, View sort, field_bitmap& fields, std::span<View> out) noexcept
+	std::size_t MemoryCache::_read_cache_impl(const write_store& map, hash_type key, View sort, field_bitmap& fields, const read_callback& callback) noexcept
 	{
 		auto f = _find_slot(map, key, sort);
 		if (f == nullptr)
 			return 0;
-		return _read_entry_impl(View::view(f->second.data()), fields, out, &map == _map.get());
+		return _read_entry_impl(View::view(f->second.data()), fields, callback);
 	}
 
-	View MemoryCache::read(hash_type key, View sort, field_bitmap fields) noexcept
+	void MemoryCache::read(hash_type key, View sort, field_bitmap fields, const read_callback& callback) noexcept
 	{
 		RDB_FMT("VCPU{} MC READ <{}>", _id, uuid::encode(key, uuid::table_alnum))
 
@@ -350,25 +344,16 @@ namespace rdb
 
 		RuntimeSchemaReflection::RTSI& info =
 			RuntimeSchemaReflection::info(_schema);
-
-		std::array<View, 255> views{};
-		const auto last = info.fields();
 		const auto required = fields.count();
-
-		auto result = [&]() {
-			return View::copy(
-				std::span(views.data(), last)
-			);
-		};
 
 		// Search cache
 		std::size_t found = 0;
 		{			
 			if ((found += _read_cache_impl(
-					*_map, key, View::view(sort), fields, views
+					*_map, key, View::view(sort), fields, callback
 				)) == required)
 			{
-				return result();
+				return;
 			}
 			else if (_flush_running)
 			{
@@ -377,10 +362,10 @@ namespace rdb
 					if (const auto lock = it->lock(); lock != nullptr)
 					{
 						if ((found += _read_cache_impl(
-								*lock, key, View::view(sort), fields, views
+								*lock, key, View::view(sort), fields, callback
 							)) == required)
 						{
-							return result();
+							return;
 						}
 					}
 				}
@@ -519,13 +504,13 @@ namespace rdb
 													RDB_TRACE("VCPU{} MC READ FOUND VALUE", _id)
 
 													if (block[off] == char(DataType::Tombstone))
-														return result();
+														return;
 
 													if ((found += _read_entry_impl(
-															View::view(block.subspan(off)), fields, views
+															View::view(block.subspan(off)), fields, callback
 														)) == required)
 													{
-														return result();
+														return;
 													}
 													else
 													{
@@ -612,13 +597,13 @@ namespace rdb
 										RDB_TRACE("VCPU{} MC READ FOUND VALUE", _id)
 
 										if (block[off] == char(DataType::Tombstone))
-											return result();
+											return;
 
 										if ((found += _read_entry_impl(
-												View::view(block.subspan(off)), fields, views
+												View::view(block.subspan(off)), fields, callback
 											)) == required)
 										{
-											return result();
+											return;
 										}
 										else
 										{
@@ -643,7 +628,6 @@ namespace rdb
 				}
 			}
 		}
-		return nullptr;
 	}
 
 	SharedBuffer MemoryCache::_make_shared_buffer(WriteType type, std::span<const unsigned char> data, std::size_t alignment) noexcept

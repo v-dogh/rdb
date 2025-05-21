@@ -24,12 +24,14 @@ int main()
 		});
 	mnt->start();
 
+	rdb::TypedView<schema::interface<"A">> value = nullptr;
 	mnt->query
 		<< rdb::compose(
 			rdb::fetch<schema>(rdbt::MakeTuple(0, 0))
-			| rdb::reset
+			| rdb::read<"A">(&value)
 		)
 		<< rdb::execute<>;
+	std::cout << value->print() << std::endl;
 
 	mnt->run<schema>([](rdb::MemoryCache* cache) {
 		cache->flush();

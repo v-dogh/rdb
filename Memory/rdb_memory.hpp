@@ -31,6 +31,7 @@ namespace rdb
 	class MemoryCache
 	{
 	public:
+		using read_callback = std::function<void(std::size_t, View)>;
 		using field_bitmap = std::bitset<256>;
 		using WriteType = rdb::WriteType;
 		using ReadType = rdb::ReadType;
@@ -123,8 +124,8 @@ namespace rdb
 		slot& _emplace_slot(write_store& map, hash_type key, View sort) noexcept;
 
 		std::size_t _read_entry_size_impl(View view) noexcept;
-		std::size_t _read_entry_impl(View view, field_bitmap& fields, std::span<View> out, bool is_primary = true) noexcept;
-		std::size_t _read_cache_impl(const write_store& map, hash_type key, View sort, field_bitmap& fields, std::span<View> out) noexcept;
+		std::size_t _read_entry_impl(View view, field_bitmap& fields, const read_callback& callback) noexcept;
+		std::size_t _read_cache_impl(const write_store& map, hash_type key, View sort, field_bitmap& fields, const read_callback& callback) noexcept;
 
 		void _write_impl(write_store& map, WriteType type, hash_type key, View sort, std::span<const unsigned char> data) noexcept;
 		void _reset_impl(write_store& map, hash_type key, View sort) noexcept;
@@ -152,7 +153,7 @@ namespace rdb
 		std::size_t pressure() const noexcept;
 		std::size_t descriptors() const noexcept;
 
-		View read(hash_type key, View sort, field_bitmap fields) noexcept;
+		void read(hash_type key, View sort, field_bitmap fields, const read_callback& callback) noexcept;
 
 		void write(WriteType type, hash_type key, View sort, std::span<const unsigned char> data) noexcept;
 		void reset(hash_type key, View sort) noexcept;

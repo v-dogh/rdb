@@ -1,5 +1,7 @@
+#include <rdb_dbg.hpp>
 #include <rdb_mount.hpp>
 #include <rdb_reflect.hpp>
+#include <limits>
 #include <format>
 #ifdef __unix__
 #include <pthread.h>
@@ -141,9 +143,12 @@ namespace rdb
 		state.wait();
 		for (decltype(auto) it : state.response)
 		{
-			state.store->handlers[
-				it.first.operand_idx - 1
-			](it.first.operator_idx - 1, it.second);
+			if (!it.second.empty())
+			{
+				state.store->handlers[
+					it.first.operand_idx - 1
+				](it.first.operator_idx - 1, it.second);
+			}
 		}
 	}
 	std::future<void> Mount::query_async(std::span<const unsigned char> packet, QueryEngine::ReadChainStore::ptr store) noexcept
@@ -236,10 +241,28 @@ namespace rdb
 		}
 		else if (op == cmd::qOp::Read)
 		{
-			info.operator_idx++;
+			MemoryCache::field_bitmap fields{};
+			std::array<unsigned short, std::numeric_limits<unsigned char>::max()> field_operator_map{};
+			off--;
+			do
+			{
+				const auto field = packet[++off];
+				fields.set(field);
+				field_operator_map[field] = ++info.operator_idx;
+			} while (
+				off + 1 < packet.size() &&
+				packet[off + 1] == char(cmd::qOp::Read)
+			);
+
 			state.acquire();
 			core.launch(Thread::task(schema, [=, &state, this](MemoryCache* cache) {
-				state.push(cache->read(key, sort, 1 << packet[1]), info);
+				std::size_t idx = 0;
+				cache->read(key, sort, fields, [&](std::size_t field, View data) {
+					state.push(View::copy(data), ParserInfo{
+						.operand_idx = info.operand_idx,
+						.operator_idx = field_operator_map[field]
+					});
+				});
 				state.release();
 			}));
 		}
