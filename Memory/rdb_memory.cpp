@@ -355,6 +355,12 @@ namespace rdb
 		const auto last = info.fields();
 		const auto required = fields.count();
 
+		auto result = [&]() {
+			return View::copy(
+				std::span(views.data(), last)
+			);
+		};
+
 		// Search cache
 		std::size_t found = 0;
 		{			
@@ -362,9 +368,7 @@ namespace rdb
 					*_map, key, View::view(sort), fields, views
 				)) == required)
 			{
-				return View::copy(
-					std::span(views.data(), last)
-				);
+				return result();
 			}
 			else if (_flush_running)
 			{
@@ -376,9 +380,7 @@ namespace rdb
 								*lock, key, View::view(sort), fields, views
 							)) == required)
 						{
-							return View::copy(
-								std::span(views.data(), last)
-							);
+							return result();
 						}
 					}
 				}
@@ -519,24 +521,16 @@ namespace rdb
 													if (block[off] == char(DataType::Tombstone))
 														return nullptr;
 
-													if (const auto result = _read_entry_impl(
-														View::view(block.subspan(off)),
-														field
-													); result != nullptr)
+													if ((found += _read_entry_impl(
+															View::view(block.subspan(off)), fields, views
+														)) == required)
 													{
-														return result;
+														return result();
 													}
 													else
 													{
-														RDB_TRACE("VCPU{} MC READ FIELD MISS", _id)
-														if (block[off] == char(DataType::SchemaInstance))
-														{
-															return nullptr;
-														}
-														else
-														{
-															break;
-														}
+														RDB_TRACE("VCPU{} MC CONTINUE SEARCH", _id)
+														break;
 													}
 												}
 												else
@@ -620,24 +614,16 @@ namespace rdb
 										if (block[off] == char(DataType::Tombstone))
 											return nullptr;
 
-										if (const auto result = _read_entry_impl(
-											View::view(block.subspan(off)),
-											field
-										); result != nullptr)
+										if ((found += _read_entry_impl(
+												View::view(block.subspan(off)), fields, views
+											)) == required)
 										{
-											return result;
+											return result();
 										}
 										else
 										{
-											RDB_TRACE("VCPU{} MC READ FIELD MISS", _id)
-											if (block[off] == char(DataType::SchemaInstance))
-											{
-												return nullptr;
-											}
-											else
-											{
-												break;
-											}
+											RDB_TRACE("VCPU{} MC CONTINUE SEARCH", _id)
+											break;
 										}
 									}
 									else
