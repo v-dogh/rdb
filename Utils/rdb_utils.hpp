@@ -1,8 +1,10 @@
 #ifndef RDB_UTILS_HPP
 #define RDB_UTILS_HPP
 
+#include <bitset>
 #include <chrono>
 #include <cstring>
+#include <numeric>
 #include <string_view>
 #include <algorithm>
 #include <optional>
@@ -323,6 +325,30 @@ namespace rdb
 			}
 			return view;
 		}
+		static auto copy(std::span<const StackView> data) noexcept
+		{
+			StackView result = copy(
+				std::accumulate(data.begin(), data.end(), std::size_t(0),
+					[](std::size_t ctr, const auto& v) { return ctr + v.size(); }
+				)
+			);
+
+			std::size_t off = 0;
+			for (decltype(auto) it : data)
+			{
+				if (!it.empty())
+				{
+					std::memcpy(
+						result.mutate().data() + off,
+						it.data().data(),
+						it.size()
+					);
+					off += it.size();
+				}
+			}
+
+			return result;
+		}
 		static auto copy(const StackView& data) noexcept
 		{
 			return copy(data.data());
@@ -430,6 +456,12 @@ namespace rdb
 		std::size_t size() const noexcept
 		{
 			return data().size();
+		}
+		bool empty() const noexcept
+		{
+			return
+				std::holds_alternative<std::nullopt_t>(_data) ||
+				size() == 0;
 		}
 
 		StackView& operator=(const StackView& copy) noexcept
@@ -577,6 +609,37 @@ namespace rdb
 
 	namespace util
 	{
+		template<std::size_t Count>
+		std::size_t bitset_first(const std::bitset<Count>& value) noexcept
+		{
+			std::size_t first = 0;
+			for (std::size_t i = 0; i < value.size(); i++)
+			{
+				if (value.test(i))
+					first = i;
+			}
+			return ~0ull;
+		}
+
+		template<std::size_t Count>
+		auto bitset_range(const std::bitset<Count>& value, std::size_t limit = 0) noexcept
+		{
+			std::size_t first = ~0ull;
+			for (std::size_t i = 0; i < limit; i++)
+			{
+				if (first != ~0ull)
+				{
+					if (!value.test(i))
+						return std::make_pair(first, i - 1);
+				}
+				else
+				{
+					if (value.test(i))
+						first = i;
+				}
+			}
+		}
+
 		template<typename Data>
 		std::string hexdump(const Data& data) noexcept
 		{

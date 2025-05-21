@@ -47,7 +47,8 @@ namespace rdb
 	enum class SortReadOp : proc_opcode
 	{
 		PrefixSize = '\xF0',
-		PrefixExtract = '\xFe'
+		PrefixExtract = '\xFe',
+		PrefixCompare = '\xFc'
 	};
 	enum class Order
 	{

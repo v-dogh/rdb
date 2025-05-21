@@ -1,6 +1,7 @@
 #ifndef RDB_MEMORY_HPP
 #define RDB_MEMORY_HPP
 
+#include <bitset>
 #include <unordered_map>
 #include <filesystem>
 #include <cstring>
@@ -23,13 +24,14 @@ namespace rdb
 
 	};
 
-	// The memory cache is a per-core immutable structure responsible for batching new writes
+	// The memory cache is a per-core immutable structure responsible for batching new writes for a schema
 	// The mount point is responsible for passing reads/writes to correct memory caches
 	// Whenever we receive a new write, we first log it, at the same time we wait until the pressure reaches a critical point (in the MemoryCache)
 	// Then we commit all of the data to disk
 	class MemoryCache
 	{
 	public:
+		using field_bitmap = std::bitset<256>;
 		using WriteType = rdb::WriteType;
 		using ReadType = rdb::ReadType;
 	private:
@@ -121,8 +123,8 @@ namespace rdb
 		slot& _emplace_slot(write_store& map, hash_type key, View sort) noexcept;
 
 		std::size_t _read_entry_size_impl(View view) noexcept;
-		View _read_entry_impl(View view, std::size_t field) noexcept;
-		View _read_cache_impl(const write_store& map, hash_type key, View sort, std::size_t field) noexcept;
+		std::size_t _read_entry_impl(View view, field_bitmap& fields, std::span<View> out, bool is_primary = true) noexcept;
+		std::size_t _read_cache_impl(const write_store& map, hash_type key, View sort, field_bitmap& fields, std::span<View> out) noexcept;
 
 		void _write_impl(write_store& map, WriteType type, hash_type key, View sort, std::span<const unsigned char> data) noexcept;
 		void _reset_impl(write_store& map, hash_type key, View sort) noexcept;
@@ -150,7 +152,7 @@ namespace rdb
 		std::size_t pressure() const noexcept;
 		std::size_t descriptors() const noexcept;
 
-		View read(hash_type key, View sort, unsigned char fields) noexcept;
+		View read(hash_type key, View sort, field_bitmap fields) noexcept;
 
 		void write(WriteType type, hash_type key, View sort, std::span<const unsigned char> data) noexcept;
 		void reset(hash_type key, View sort) noexcept;

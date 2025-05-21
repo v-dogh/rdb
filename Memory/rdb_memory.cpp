@@ -278,63 +278,93 @@ namespace rdb
 		else
 			return sizeof(DataType);
 	}
-	View MemoryCache::_read_entry_impl(View view, std::size_t field) noexcept
+	std::size_t MemoryCache::_read_entry_impl(View view, field_bitmap& fields, std::span<View> out, bool is_primary) noexcept
 	{
 		RuntimeSchemaReflection::RTSI& info =
 			RuntimeSchemaReflection::info(_schema);
+		std::size_t cnt = 0;
 		if (view.data()[0] == char(DataType::FieldSequence))
 		{
-			RuntimeInterfaceReflection::RTII& ffield =
-				info.reflect(field);
-
 			std::size_t off = 1;
-			while (view.data()[off++] != field &&
-				   off < view.size())
+			do
 			{
-				RuntimeInterfaceReflection::RTII& field =
-					info.reflect(view.data()[off]);
-				off += field.storage(view.data().data() + off);
-			}
+				const auto field = view.data()[off++];
+				const auto beg = off;
+				RuntimeInterfaceReflection::RTII& finf =
+					info.reflect(field);
+				off += finf.storage(view.data().data() + off);
 
-			if (off < view.size())
-			{
-				return View::copy(std::span(
-					view.data().subspan(
-						off,
-						ffield.storage(view.data().data() + off)
-					)
-				));
-			}
+				if (fields.test(field))
+				{
+					fields.reset(field);
+					cnt++;
+					out[field] =
+						is_primary ?
+							View::view(view.data().subspan(beg, off - beg)) :
+							View::view(view.data().subspan(beg, off - beg));
+				}
+			} while (off < view.size());
 		}
 		else if (view.data()[0] == char(DataType::SchemaInstance))
 		{
-			return View::copy(
-				info.cfield(view.data().data() + 1, field)
-			);
+			std::size_t off = 1;
+			std::size_t idx = 0;
+			while (off < view.size())
+			{
+				const auto beg = off;
+				RuntimeInterfaceReflection::RTII& finf =
+					info.reflect(idx);
+				off += finf.storage(view.data().data() + off);
+
+				if (fields.test(idx))
+				{
+					fields.reset(idx);
+					cnt++;
+					out[idx] =
+						is_primary ?
+							View::view(view.data().subspan(beg, off - beg)) :
+							View::view(view.data().subspan(beg, off - beg));
+				}
+				idx++;
+			}
 		}
-		return nullptr;
+		return cnt;
 	}
-	View MemoryCache::_read_cache_impl(const write_store& map, hash_type key, View sort, std::size_t field) noexcept
+	std::size_t MemoryCache::_read_cache_impl(const write_store& map, hash_type key, View sort, field_bitmap& fields, std::span<View> out) noexcept
 	{
 		auto f = _find_slot(map, key, sort);
 		if (f == nullptr)
-			return nullptr;
-		return _read_entry_impl(View::view(f->second.data()), field);
+			return 0;
+		return _read_entry_impl(View::view(f->second.data()), fields, out, &map == _map.get());
 	}
 
-	View MemoryCache::read(hash_type key, View sort, unsigned char fields) noexcept
+	View MemoryCache::read(hash_type key, View sort, field_bitmap fields) noexcept
 	{
 		RDB_FMT("VCPU{} MC READ <{}>", _id, uuid::encode(key, uuid::table_alnum))
 
-		std::size_t field = 0;
+		// 1. Search cache
+		// 2. If not found -> search disk (from newest to oldest)
+		//
+		// If requires accumulation -> get an accumulation handle and accumulate until tail or result
+		// Accumulation applies even if the data is already in cache
+
+		RuntimeSchemaReflection::RTSI& info =
+			RuntimeSchemaReflection::info(_schema);
+
+		std::array<View, 255> views{};
+		const auto last = info.fields();
+		const auto required = fields.count();
 
 		// Search cache
+		std::size_t found = 0;
 		{			
-			if (auto result = _read_cache_impl(
-					*_map, key, View::view(sort), field
-				); result != nullptr)
+			if ((found += _read_cache_impl(
+					*_map, key, View::view(sort), fields, views
+				)) == required)
 			{
-				return result;
+				return View::copy(
+					std::span(views.data(), last)
+				);
 			}
 			else if (_flush_running)
 			{
@@ -342,11 +372,13 @@ namespace rdb
 				{
 					if (const auto lock = it->lock(); lock != nullptr)
 					{
-						if (auto result = _read_cache_impl(
-								*lock, key, View::view(sort), field
-							); result != nullptr)
+						if ((found += _read_cache_impl(
+								*lock, key, View::view(sort), fields, views
+							)) == required)
 						{
-							return result;
+							return View::copy(
+								std::span(views.data(), last)
+							);
 						}
 					}
 				}
@@ -357,10 +389,6 @@ namespace rdb
 		// Search disk
 		{
 			RDB_TRACE("VCPU{} MC READ CACHE MISS", _id)
-
-			RuntimeSchemaReflection::RTSI& info =
-				RuntimeSchemaReflection::info(_schema);
-
 			for (std::size_t j = _flush_id; j > 0; j--)
 			{
 				RDB_TRACE("VCPU{} MC READ SEARCHING FLUSH{}", _id, j - 1)
