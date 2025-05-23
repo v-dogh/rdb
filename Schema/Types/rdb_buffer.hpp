@@ -116,10 +116,13 @@ namespace rdb::type
 			public InterfaceMake<BufferBase<Type, Fragmented>>,
 			public InterfaceHelper<BufferBase<Type, Fragmented>>
 	{
+	private:
+		static constexpr auto _is_dynamic = Type::uproperty.is(Type::uproperty.dynamic);
+		static constexpr auto _is_trivial = Type::uproperty.is(Type::uproperty.trivial);
 	public:
 		using list = std::initializer_list<TypedView<Type>>;
-		using Iterator = impl::BufferIterator<Type, false, !Type::udynamic>;
-		using ConstIterator = impl::BufferIterator<Type, true, !Type::udynamic>;
+		using Iterator = impl::BufferIterator<Type, false, !_is_dynamic>;
+		using ConstIterator = impl::BufferIterator<Type, true, !_is_dynamic>;
 
 		struct Reserve
 		{
@@ -159,7 +162,7 @@ namespace rdb::type
 		bool _has_sbo() const noexcept
 		{
 			if constexpr (_sbo_max)
-				return (_sbo.length & _sbo_tag) == 0;
+				return (_sbo.length & _sbo_tag) == _sbo_tag;
 			else
 				return false;
 		}
@@ -178,6 +181,24 @@ namespace rdb::type
 		}
 		std::size_t _volume() const noexcept
 		{
+			if (_has_sbo())
+			{
+				const auto len = _size();
+				if constexpr (_is_dynamic)
+				{
+					std::size_t off = 0;
+					while (off < len)
+					{
+						auto ptr = _buffer(off);
+						off += ptr->storage();
+					}
+					return off;
+				}
+				else
+				{
+					return len * Type::static_storage();
+				}
+			}
 			return byte::byteswap_for_storage(_std.volume & _volume_mask);
 		}
 		std::size_t _size() const noexcept
@@ -205,7 +226,6 @@ namespace rdb::type
 			if (size > _sbo_max)
 			{
 				_std.volume = byte::byteswap_for_storage(vol);
-				_sbo.length |= _sbo_tag;
 			}
 		}
 		void _set_dims(std::size_t size, std::size_t vol) noexcept
@@ -263,7 +283,7 @@ namespace rdb::type
 
 		const Type* _at_impl(std::size_t idx) const noexcept
 		{
-			if constexpr (Type::udynamic)
+			if constexpr (_is_dynamic)
 			{
 				std::size_t off = 0;
 				while (--idx != 0)
@@ -308,7 +328,7 @@ namespace rdb::type
 		}
 		static auto mstorage(const list& cpy) noexcept
 		{
-			if constexpr (Type::udynamic)
+			if constexpr (_is_dynamic)
 			{
 				return mstorage() + std::accumulate(cpy.begin(), cpy.end(), std::size_t{ 0 }, [](const auto& value, std::size_t ctr) {
 					return ctr + value->storage();
@@ -444,11 +464,11 @@ namespace rdb::type
 
 		const Type& at(std::size_t idx) const noexcept
 		{
-
+			return *_at_impl(idx);
 		}
 		Type& at(std::size_t idx) noexcept
 		{
-
+			return *_at_impl(idx);
 		}
 
 		Iterator begin() noexcept
@@ -487,7 +507,24 @@ namespace rdb::type
 
 		key_type hash() const noexcept
 		{
-
+			if constexpr (_is_trivial)
+			{
+				return uuid::xxhash(
+					_binary_buffer().subspan(0, _volume())
+				);
+			}
+			else
+			{
+				key_type result = 0x00;
+				for (decltype(auto) it : *this)
+				{
+					result = uuid::xxhash_combine(
+						result,
+						it.hash()
+					);
+				}
+				return result;
+			}
 		}
 
 		std::size_t storage() const noexcept
@@ -496,29 +533,46 @@ namespace rdb::type
 		}
 		std::string print() const noexcept
 		{
-			std::stringstream out;
-
-			out << "[ ";
-			bool first = true;
-			for (decltype(auto) it : *this)
+			if constexpr (
+				std::is_same_v<Type, Character> ||
+				std::is_same_v<Type, U8Character> ||
+				std::is_same_v<Type, U16Character> ||
+				std::is_same_v<Type, U32Character>
+			)
 			{
-				if (first)
-				{
-					first = false;
-				}
-				else
-				{
-					out << ", ";
-				}
-
-				out
-					<< "'"
-					<< it.print()
-					<< "'";
+				using type = std::remove_cvref_t<decltype(std::declval<Type>().value())>;
+				return std::format("'{}'",
+					std::basic_string_view<type>(
+						_buffer()->underlying(), _size() + 1
+					)
+				);
 			}
-			out << " ]";
+			else
+			{
+				std::stringstream out;
 
-			return out.str();
+				out << "[ ";
+				bool first = true;
+				for (decltype(auto) it : *this)
+				{
+					if (first)
+					{
+						first = false;
+					}
+					else
+					{
+						out << ", ";
+					}
+
+					out
+						<< "'"
+						<< it.print()
+						<< "'";
+				}
+				out << " ]";
+
+				return out.str();
+			}
 		}
 
 		wproc_query_result wproc(proc_opcode opcode, proc_param arguments, wproc_query query) noexcept

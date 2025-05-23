@@ -51,6 +51,10 @@ namespace rdb::type
 			using param = ScalarBase;
 		};
 
+		const Type* underlying() const noexcept
+		{
+			return &_value;
+		}
 		Type value() const noexcept
 		{
 			return byte::byteswap_for_storage(_value);

@@ -35,20 +35,6 @@ namespace rdb
 	// A write procedure is defined by an opcode (byte) and parameters passed after the opcode
 
 	template<typename Type>
-	concept QueryResult = requires (const Type& cv)
-	{
-		// Returns a host-order view of the bytes of the query result
-		{ cv.view() } -> std::same_as<View>;
-	};
-
-	template<typename Type>
-	concept QueryParams = requires (const Type& cv)
-	{
-		// Returns a host-order view of the bytes of the parameters
-		{ cv.view() } -> std::same_as<View>;
-	};
-
-	template<typename Type>
 	concept InterfaceType = requires (Type& v)
 	{
 		// Returns the ammount of storage required by the type
@@ -69,7 +55,7 @@ namespace rdb
 		// These are meant to provide type safe access to interfaces from the user
 		{ Type::uname } -> std::convertible_to<std::string_view>;
 		{ Type::ucode } -> std::convertible_to<std::size_t>;
-		{ Type::udynamic } -> std::convertible_to<bool>;
+		{ Type::uproperty };
 		{ typename Type::rOp() } -> std::convertible_to<proc_opcode>;
 		{ typename Type::wOp() } -> std::convertible_to<proc_opcode>;
 		{ typename Type::fOp() } -> std::convertible_to<proc_opcode>;
@@ -180,25 +166,41 @@ namespace rdb
 		}
 	};
 
-	template<typename Base, cmp::ConstString UniqueName, bool Dynamic = false, bool Fragmented = false, typename Accumulator = void, typename Compressor = void>
+	struct InterfaceProperty
+	{
+		static constexpr std::uint64_t trivial = 1 << 0;
+		static constexpr std::uint64_t dynamic = 1 << 0;
+		static constexpr std::uint64_t fragmented = 1 << 0;
+		std::uint64_t value{ trivial };
+
+		constexpr InterfaceProperty() = default;
+		constexpr InterfaceProperty(std::uint64_t value) : value(value) {}
+
+		constexpr bool is(std::uint64_t property) const noexcept
+		{
+			return (value & property) == property;
+		}
+	};
+
+	template<typename Base, cmp::ConstString UniqueName, InterfaceProperty Property = InterfaceProperty(), typename Accumulator = void, typename Compressor = void>
 	struct Interface
 	{
 	public:
-		static constexpr auto udynamic = Dynamic;
+		static constexpr auto uproperty = Property;
 		static constexpr auto cuname = UniqueName;
 		static constexpr auto uname = *UniqueName;
 		static inline auto ucode = ucode_type(std::hash<std::string_view>()(uname));
 		static void require()
 		{
 			RuntimeInterfaceReflection::reg(ucode, RuntimeInterfaceReflection::RTII{
-				[]() { return udynamic; },
+				[]() { return uproperty.is(uproperty.dynamic); },
 				[]() { return alignof(Base); },
 				[](const void* ptr) { return static_cast<const Base*>(ptr)->storage(); },
 				[]() { return sizeof(Base); },
 				[](void* ptr, proc_opcode o, proc_param p, wproc_query q) { return static_cast<Base*>(ptr)->wproc(o, proc_param::view(p), q); },
 				[](const void* ptr, proc_opcode o, proc_param p) { return static_cast<const Base*>(ptr)->rproc(o, proc_param::view(p)); },
 				[](const void* ptr, proc_opcode o, proc_param p) { return static_cast<const Base*>(ptr)->fproc(o, proc_param::view(p)); },
-				[]() { return Fragmented; },
+				[]() { return uproperty.is(uproperty.fragmented); },
 				[]() { return AccumulatorHandle::make<Accumulator>(); },
 				[]() { return CompressorHandle::make<Compressor>(); }
 			});
@@ -207,23 +209,6 @@ namespace rdb
 		Interface() = default;
 		Interface(const Interface&) = delete;
 		Interface(Interface&&) = delete;
-
-		View view() const noexcept
-		{
-			if (byte::is_storage_endian())
-			{
-				return View::view(
-					reinterpret_cast<const unsigned char*>(this),
-					static_cast<const Base*>(this)->storage()
-				);
-			}
-			else
-			{
-				View view = View::copy(static_cast<const Base*>(this)->storage());
-				static_cast<const Base*>(this)->place_view(View::view(view.mutate()));
-				return view;
-			}
-		}
 	};
 
 	template<cmp::ConstString Name, InterfaceType Inf>
@@ -246,7 +231,7 @@ namespace rdb
 			enum
 			{
 				Value =
-					!Field::interface::udynamic &&
+					!Field::interface::uproperty.is(InterfaceProperty::dynamic) &&
 					AreStaticImpl<Rest...>::Value
 			};
 		};

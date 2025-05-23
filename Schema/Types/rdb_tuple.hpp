@@ -13,7 +13,8 @@ namespace rdb::type
 		public Interface<
 			Tuple<Ts...>,
 			cmp::concat_const_string<"t<", Ts::cuname..., ">">(),
-			(Ts::udynamic || ...)
+			((Ts::uproperty.is(Ts::uproperty.dynamic) || ...) ? InterfaceProperty::dynamic : 0x00) |
+			((Ts::uproperty.is(Ts::uproperty.trivial) && ...) ? InterfaceProperty::trivial : 0x00)
 		>
 	{
 	private:
@@ -111,7 +112,7 @@ namespace rdb::type
 		template<std::size_t Idx>
 		constexpr std::size_t _offset_of() const noexcept
 		{
-			if constexpr (Tuple::udynamic)
+			if constexpr (Tuple::uproperty.is(Tuple::uproperty.dynamic))
 			{
 				std::size_t off = 0;
 				[&]<std::size_t... Idv>(std::index_sequence<Idv...>) {
@@ -249,7 +250,7 @@ namespace rdb::type
 
 		static constexpr std::size_t static_storage() noexcept
 		{
-			if constexpr (!(Ts::udynamic || ...))
+			if constexpr (!(Ts::uproperty.is(Ts::uproperty.dynamic) || ...))
 				return (Ts::static_storage() + ...);
 			else
 				static_assert(false, "Type is dynamic");

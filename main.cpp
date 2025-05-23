@@ -4,10 +4,8 @@
 
 int main()
 {
-	auto buffer = rdbt::Binary::make(
-		rdbt::Binary::Reserve(1024)
-	);
-	std::cout << buffer->size() << std::endl;
+	auto buffer = rdbt::String::make('h', 'e', 'l');
+	std::cout << buffer->print() << std::endl;
 
 	// using schema = rdb::Schema<"test",
 	// 	rdb::Keyset<rdb::Partition<"A">>,
