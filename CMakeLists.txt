@@ -47,9 +47,11 @@ add_executable(RDB main.cpp
     Schema/rdb_reflect.hpp
     Schema/rdb_reflect.cpp
     Schema/rdb_keytype.hpp
+    Schema/rdb_types.hpp
     Schema/Types/rdb_scalar.hpp
     Schema/Types/rdb_tuple.hpp
     Schema/Types/rdb_buffer.hpp
+    Schema/Types/rdb_time.hpp
 
     # Network
 
@@ -67,7 +69,6 @@ add_executable(RDB main.cpp
     Utils/rdb_locale.hpp
     Utils/rdb_memunits.hpp
     Utils/rdb_dbg.hpp
-    Schema/Types/rdb_time.hpp
 )
 target_link_libraries(RDB PRIVATE snappy)
 

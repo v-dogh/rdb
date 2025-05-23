@@ -7,9 +7,21 @@
 #include <rdb_reflect.hpp>
 #include <rdb_utils.hpp>
 #include <rdb_keytype.hpp>
+#include <rdb_locale.hpp>
 
 namespace rdb
 {
+	namespace type
+	{
+		template<typename... Argv>
+		struct Make
+		{
+			std::tuple<Argv...> data;
+			Make(Argv&&... args)
+				: data(std::forward_as_tuple(std::forward<Argv>(args)...)) {}
+		};
+	}
+
 	// <Interfaces>
 	// An interface is the most basic unit of data
 	// Topologies of schemas are composed of fields of which each field is a unique named interface
@@ -39,10 +51,6 @@ namespace rdb
 	template<typename Type>
 	concept InterfaceType = requires (Type& v)
 	{
-		// Returns a host-order view of the bytes of the interface
-		// I.e. if the order is not host, the implementation has to perform a byteswap (the view then holds dynamic data)
-		{ v.view() } -> std::same_as<View>;
-		{ v.place_view(std::declval<View>()) } -> std::same_as<void>;
 		// Returns the ammount of storage required by the type
 		// E.g. a string might return it's length + the header
 		{ v.storage() } -> std::same_as<std::size_t>;
@@ -136,7 +144,43 @@ namespace rdb
 		static constexpr auto sort_order = KeyOrdering<Idx>::order;
 	};
 
-	template<typename Type, cmp::ConstString UniqueName, bool Dynamic = false, bool Fragmented = false, typename Accumulator = void, typename Compressor = void>
+	template<typename Base>
+	class InterfaceHelper
+	{
+	public:
+		const void* _dynamic_field() const noexcept
+		{
+			return static_cast<const Base*>(this + 1);
+		}
+		void* _dynamic_field() noexcept
+		{
+			return static_cast<Base*>(this + 1);
+		}
+	};
+
+	template<typename Base>
+	struct InterfaceMake
+	{
+		template<typename... Argv>
+		static auto make(Argv&&... args) noexcept
+		{
+			auto view = TypedView<Base>::copy(Base::mstorage(args...));
+			Base::minline(view.mutate(), std::forward<Argv>(args)...);
+			return view;
+		}
+
+		template<typename... Argv>
+		static auto make(type::Make<Argv...>&& args) noexcept
+		{
+			return std::apply([](auto&&... args) {
+				auto view = TypedView<Base>::copy(Base::mstorage(args...));
+				Base::minline(view.mutate(), std::forward<Argv>(args)...);
+				return view;
+			}, args.data);
+		}
+	};
+
+	template<typename Base, cmp::ConstString UniqueName, bool Dynamic = false, bool Fragmented = false, typename Accumulator = void, typename Compressor = void>
 	struct Interface
 	{
 	public:
@@ -148,27 +192,16 @@ namespace rdb
 		{
 			RuntimeInterfaceReflection::reg(ucode, RuntimeInterfaceReflection::RTII{
 				[]() { return udynamic; },
-				[]() { return alignof(Type); },
-				[](const void* ptr) { return static_cast<const Type*>(ptr)->storage(); },
-				[]() { return sizeof(Type); },
-				[](void* ptr, proc_opcode o, proc_param p, wproc_query q) { return static_cast<Type*>(ptr)->wproc(o, proc_param::view(p), q); },
-				[](const void* ptr, proc_opcode o, proc_param p) { return static_cast<const Type*>(ptr)->rproc(o, proc_param::view(p)); },
-				[](const void* ptr, proc_opcode o, proc_param p) { return static_cast<const Type*>(ptr)->fproc(o, proc_param::view(p)); },
+				[]() { return alignof(Base); },
+				[](const void* ptr) { return static_cast<const Base*>(ptr)->storage(); },
+				[]() { return sizeof(Base); },
+				[](void* ptr, proc_opcode o, proc_param p, wproc_query q) { return static_cast<Base*>(ptr)->wproc(o, proc_param::view(p), q); },
+				[](const void* ptr, proc_opcode o, proc_param p) { return static_cast<const Base*>(ptr)->rproc(o, proc_param::view(p)); },
+				[](const void* ptr, proc_opcode o, proc_param p) { return static_cast<const Base*>(ptr)->fproc(o, proc_param::view(p)); },
 				[]() { return Fragmented; },
 				[]() { return AccumulatorHandle::make<Accumulator>(); },
 				[]() { return CompressorHandle::make<Compressor>(); }
 			});
-		}
-	protected:
-		const void* _dynamic_field() const noexcept
-		{
-			static_assert(Dynamic, "Attempt to access dynamic field in static interface");
-			return static_cast<Type*>(this + 1);
-		}
-		void* _dynamic_field() noexcept
-		{
-			static_assert(Dynamic, "Attempt to access dynamic field in static interface");
-			return static_cast<Type*>(this + 1);
 		}
 	public:
 		Interface() = default;
@@ -177,9 +210,19 @@ namespace rdb
 
 		View view() const noexcept
 		{
-			View view = View::copy(static_cast<const Type*>(this)->storage());
-			static_cast<const Type*>(this)->place_view(View::view(view.mutate()));
-			return view;
+			if (byte::is_storage_endian())
+			{
+				return View::view(
+					reinterpret_cast<const unsigned char*>(this),
+					static_cast<const Base*>(this)->storage()
+				);
+			}
+			else
+			{
+				View view = View::copy(static_cast<const Base*>(this)->storage());
+				static_cast<const Base*>(this)->place_view(View::view(view.mutate()));
+				return view;
+			}
 		}
 	};
 

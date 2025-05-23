@@ -7,20 +7,14 @@
 
 namespace rdb::type
 {
-	template<typename... Argv>
-	struct MakeTuple
-	{
-		std::tuple<Argv...> data;
-		MakeTuple(Argv&&... args)
-			: data(std::forward_as_tuple(std::forward<Argv>(args)...)) {}
-	};
-
 	template<typename... Ts>
-	class alignas(std::max({ alignof(Ts)... })) Tuple : public Interface<
-		Tuple<Ts...>,
-		cmp::concat_const_string<"t<", Ts::cuname..., ">">(),
-		(Ts::udynamic || ...)
-	>
+	class alignas(std::max({ alignof(Ts)... })) Tuple :
+		public InterfaceMake<Tuple<Ts...>>,
+		public Interface<
+			Tuple<Ts...>,
+			cmp::concat_const_string<"t<", Ts::cuname..., ">">(),
+			(Ts::udynamic || ...)
+		>
 	{
 	private:
 		template<typename Type>
@@ -138,7 +132,7 @@ namespace rdb::type
 			return (Ts::mstorage(args) + ...);
 		}
 		template<typename... Argv>
-		static auto mstorage(const MakeTuple<Argv...>& args) noexcept
+		static auto mstorage(const Make<Argv...>& args) noexcept
 		{
 			return std::apply([](const auto&... args) {
 				return (Ts::mstorage(args) + ...);
@@ -156,25 +150,10 @@ namespace rdb::type
 			return mstorage(args...);
 		}
 		template<typename... Argv>
-		static auto minline(std::span<unsigned char> view, MakeTuple<Argv...> args) noexcept
+		static auto minline(std::span<unsigned char> view, Make<Argv...> args) noexcept
 		{
 			return std::apply([&](auto&&... args) {
 				return minline(view, std::forward<Argv>(args)...);
-			}, args.data);
-		}
-
-		template<typename... Argv>
-		static auto make(Argv&&... args) noexcept
-		{
-			auto view = TypedView<Tuple>::copy(mstorage(args...));
-			new (view.mutate().data()) Tuple(std::forward<Argv>(args)...);
-			return view;
-		}
-		template<typename... Argv>
-		static auto make(MakeTuple<Argv...> args) noexcept
-		{
-			return std::apply([](auto&&... args) {
-				return make(std::forward<Argv>(args)...);
 			}, args.data);
 		}
 
@@ -211,7 +190,7 @@ namespace rdb::type
 			Equal = proc_opcode(SortFilterOp::Equal),
 		};
 
-		template<wOp Op>
+		template<rOp Op>
 		struct ReadPair
 		{
 			using param = void;
@@ -228,21 +207,6 @@ namespace rdb::type
 			using param = Tuple;
 		};
 
-		void place_view(View view) const noexcept
-		{
-			if constexpr (byte::is_storage_endian())
-			{
-				std::memcpy(view.mutate().data(), this, storage());
-			}
-			else
-			{
-				std::size_t off = 0;
-				([&]() {
-					_at<Ts>(off)->place_view(View::subview(off));
-					off += _at<Ts>(off)->storage();
-				}(), ...);
-			}
-		}
 		key_type hash() const noexcept
 		{
 			std::size_t off = 0;

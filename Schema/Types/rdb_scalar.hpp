@@ -6,30 +6,25 @@
 
 namespace rdb::type
 {
-	template<cmp::ConstString UniqueName, typename Type> requires std::is_trivial_v<Type>
-	class Scalar : public Interface<Scalar<UniqueName, Type>, UniqueName>
+	template<typename Type> requires std::is_trivial_v<Type>
+	class ScalarBase : public InterfaceMake<ScalarBase<Type>>
 	{
 	private:
 		Type _value{ 0 };
 	public:
 		static auto mstorage(const Type& value = Type{}) noexcept
 		{
-			return sizeof(Scalar);
+			return sizeof(ScalarBase);
 		}
 		static auto minline(std::span<unsigned char> view, Type value = {}) noexcept
 		{
-			new (view.data()) Scalar(value);
-			return sizeof(Scalar);
-		}
-		static auto make(Type value) noexcept
-		{
-			auto view = TypedView<Scalar>::copy(sizeof(Scalar));
-			new (view.mutate().data()) Scalar(value);
-			return view;
+			new (view.data()) ScalarBase(value);
+			return sizeof(ScalarBase);
 		}
 
-		Scalar() = default;
-		explicit Scalar(Type value) : _value(value) {}
+		ScalarBase() = default;
+		explicit ScalarBase(Type value)
+			: _value(byte::byteswap_for_storage(value)) {}
 
 		enum rOp : proc_opcode { };
 		enum wOp : proc_opcode
@@ -48,39 +43,24 @@ namespace rdb::type
 		template<wOp Op>
 		struct WritePair
 		{
-			using param = Scalar;
+			using param = ScalarBase;
 		};
 		template<fOp Op>
 		struct FilterPair
 		{
-			using param = Scalar;
+			using param = ScalarBase;
 		};
 
-		Type& value() noexcept
+		Type value() const noexcept
 		{
-			return _value;
+			return byte::byteswap_for_storage(_value);
 		}
 
-		void place_view(View view) const noexcept
-		{
-			const auto* beg = reinterpret_cast<const unsigned char*>(this);
-			const auto* end = beg + storage();
-			const auto tv = TypedView<Scalar>::view(view.mutate());
-			if constexpr (byte::is_storage_endian())
-			{
-				tv->_value = _value;
-			}
-			else
-			{
-				tv = byte::byteswap(_value);
-			}
-		}
 		key_type hash() const noexcept
 		{
-			const auto v = byte::byteswap_for_storage(_value);
 			return uuid::xxhash(std::span(
-				reinterpret_cast<const unsigned char*>(&v),
-				sizeof(v)
+				reinterpret_cast<const unsigned char*>(&_value),
+				sizeof(_value)
 			));
 		}
 
@@ -94,28 +74,39 @@ namespace rdb::type
 		}
 		std::string print() const noexcept
 		{
-			return std::to_string(_value);
+			return std::to_string(value());
 		}
 
 		wproc_query_result wproc(proc_opcode opcode, proc_param arguments, wproc_query query) noexcept
 		{
-			const auto& arg = TypedView<Scalar>::view(arguments.data())->_value;
-			if (opcode == wOp::Add) _value += arg;
-			else if (opcode == wOp::Mul) _value *= arg;
-			else if (opcode == wOp::Div) _value /= arg;
+			const auto& arg = byte::byteswap_for_storage(
+				TypedView<ScalarBase>::view(arguments.data())->_value
+			);
+			Type result;
+			if (opcode == wOp::Add) result = value() + arg;
+			else if (opcode == wOp::Mul) result = value() * arg;
+			else if (opcode == wOp::Div) result = value() / arg;
+			_value = byte::byteswap_for_storage(result);
 			return wproc_type::Static;
 		}
 		rproc_result rproc(proc_opcode, proc_param) const noexcept { return View(); }
 		bool fproc(proc_opcode opcode, proc_param arguments) const noexcept
 		{
-			const auto arg = TypedView<Scalar>::view(arguments.data())->_value;
-			const auto val = _value;
-			if (opcode == fOp::Larger) return _value > arg;
-			else if (opcode == fOp::Smaller) return _value < arg;
-			else if (opcode == fOp::Equal) return _value == arg;
+			const auto arg = byte::byteswap_for_storage(
+				TypedView<ScalarBase>::view(arguments.data())->_value
+			);
+			if (opcode == fOp::Larger) return value() > arg;
+			else if (opcode == fOp::Smaller) return value() < arg;
+			else if (opcode == fOp::Equal) return value() == arg;
 			return false;
 		}
 	};
+
+	template<cmp::ConstString UniqueName, typename Type> requires std::is_trivial_v<Type>
+	class Scalar :
+		public ScalarBase<Type>,
+		public Interface<Scalar<UniqueName, Type>, UniqueName>
+	{ };
 
 	using Uint8 = Scalar<"u8", std::uint8_t>;
 	using Uint16 = Scalar<"u16", std::uint16_t>;
@@ -128,6 +119,10 @@ namespace rdb::type
 	using Int64 = Scalar<"i64", std::uint64_t>;
 
 	using Byte = Uint8;
+	using Character = Scalar<"char", char>;
+	using U8Character = Scalar<"char8", char8_t>;
+	using U16Character = Scalar<"char16", char16_t>;
+	using U32Character = Scalar<"char32", char32_t>;
 }
 
 #endif // RDB_SCALAR_HPP

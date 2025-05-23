@@ -208,7 +208,7 @@ namespace rdb
 				off += byte::swrite(buffer, off,
 					Schema::template interface<Field>::make(
 						std::move(data)
-					)->view()
+					)
 				);
 				return off;
 			}
@@ -236,7 +236,7 @@ namespace rdb
 				buffer[1] = static_cast<std::uint8_t>(Schema::template index_of<Field>());
 				std::size_t off = sizeof(qOp) + sizeof(std::uint8_t);
 				off += byte::swrite<std::uint32_t>(buffer, off, data.size());
-				off += byte::swrite(buffer, off, data->view());
+				off += byte::swrite(buffer, off, data);
 				return off;
 			}
 		};
@@ -270,7 +270,7 @@ namespace rdb
 				using type = Scheme::template interface<Field>;
 				off += byte::swrite(buffer, off, type::template WritePair<typename type::wOp(Op)>::param::make(
 					std::move(data), buffer.subspan(off)
-				)->view());
+				));
 				return off;
 			}
 		};
@@ -366,7 +366,7 @@ namespace rdb
 								std::get<Schema::keyset::partition_count + Idx>(args))
 							);
 							off += byte::swrite(view.mutate(), off,
-								value->view()
+								value
 							);
 						}.template operator()<Idv>(), ...);
 						return view;
