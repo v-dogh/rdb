@@ -166,7 +166,7 @@ namespace rdb::type
 			}(), ...);
 		}
 		template<typename... Argv>
-		Tuple(Argv&&... args)
+		explicit Tuple(Argv&&... args)
 		{
 			std::size_t off = 0;
 			([&]() {
@@ -257,7 +257,7 @@ namespace rdb::type
 		}
 		constexpr std::size_t storage() const noexcept
 		{
-			if constexpr (Tuple::udynamic)
+			if constexpr (Tuple::uproperty.is(Tuple::uproperty.dynamic))
 			{
 				std::size_t off = 0;
 				return ((off += _at<Ts>(off)->storage()), ...);

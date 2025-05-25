@@ -1,42 +1,46 @@
+#include <iostream>
 #include <rdb_mount.hpp>
 #include <rdb_types.hpp>
-#include <iostream>
 
 int main()
 {
-	auto buffer = rdbt::String::make('h', 'e', 'l');
-	std::cout << buffer->print() << std::endl;
-
-	// using schema = rdb::Schema<"test",
-	// 	rdb::Keyset<rdb::Partition<"A">>,
+	// using schema = rdb::Schema<"Message",
+	// 	rdb::Keyset<
+	// 		rdb::Partition<"ChannelID">,
+	// 		rdb::Sort<"ID">
+	// 	>,
 	// 	rdb::Topology<
-	// 		rdb::Field<"A", rdbt::Tuple<
-	// 			rdbt::Uint8,
-	// 			rdbt::Uint8
-	// 		>>,
-	// 		rdb::Field<"B", rdbt::Uint64>
+	// 		rdb::Field<"ID", rdbt::TimeUUID>,
+	// 		rdb::Field<"ChannelID", rdbt::VRandUUID>,
+	// 		rdb::Field<"SenderID", rdbt::Hash>,
+	// 		rdb::Field<"Flags", rdbt::Bitset<32>>,
+	// 		rdb::Field<"Message", rdbt::Binary>
 	// 	>
 	// >;
-	// rdb::require<schema>();
+	using schema = rdb::Schema<"Message",
+		rdb::Keyset<rdb::Partition<"A">>,
+		rdb::Topology<
+			rdb::Field<"A", rdbt::Uint64>
+		>
+	>;
+	rdb::require<schema>();
 
-	// rdb::Mount::ptr mnt =
-	// 	rdb::Mount::make({
-	// 		.root = "/tmp/RDB"
-	// 	});
-	// mnt->start();
+	rdb::Mount::ptr mnt =
+		rdb::Mount::make({
+			.root = "/tmp/RDB"
+		});
+	mnt->start();
 
-	// rdb::TypedView<schema::interface<"A">> value = nullptr;
-	// mnt->query
-	// 	<< rdb::compose(
-	// 		rdb::fetch<schema>(rdbt::Make(0, 0))
-	// 		| rdb::read<"A">(&value)
-	// 	)
-	// 	<< rdb::execute<>;
-	// std::cout << value->print() << std::endl;
+	mnt->query
+		<< rdb::compose(
+			rdb::fetch<schema>(0)
+			| rdb::reset
+		)
+		<< rdb::execute<>;
 
-	// mnt->run<schema>([](rdb::MemoryCache* cache) {
-	// 	cache->flush();
-	// });
+	mnt->run<schema>([](rdb::MemoryCache* cache) {
+		cache->flush();
+	});
 
-	// mnt->wait();
+	mnt->wait();
 }

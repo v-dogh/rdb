@@ -6,9 +6,11 @@
 
 namespace rdb::type
 {
-	template<typename Type> requires std::is_trivial_v<Type>
-	class ScalarBase : public InterfaceMake<ScalarBase<Type>>
+	template<typename Base, typename Type> requires std::is_trivial_v<Type>
+	class ScalarBase : public InterfaceMake<Base>
 	{
+	public:
+		using value_type = Type;
 	private:
 		Type _value{ 0 };
 	public:
@@ -78,19 +80,30 @@ namespace rdb::type
 		}
 		std::string print() const noexcept
 		{
-			return std::to_string(value());
+			return util::to_string(value());
 		}
 
 		wproc_query_result wproc(proc_opcode opcode, proc_param arguments, wproc_query query) noexcept
 		{
-			const auto& arg = byte::byteswap_for_storage(
-				TypedView<ScalarBase>::view(arguments.data())->_value
-			);
-			Type result;
-			if (opcode == wOp::Add) result = value() + arg;
-			else if (opcode == wOp::Mul) result = value() * arg;
-			else if (opcode == wOp::Div) result = value() / arg;
-			_value = byte::byteswap_for_storage(result);
+			if (query == wproc_query::Commit)
+			{
+				if constexpr (std::is_arithmetic_v<Type>)
+				{
+					const auto& arg = byte::byteswap_for_storage(
+						TypedView<ScalarBase>::view(arguments.data())->_value
+					);
+					Type result;
+					if (opcode == wOp::Add) result = value() + arg;
+					else if (opcode == wOp::Mul) result = value() * arg;
+					else if (opcode == wOp::Div) result = value() / arg;
+					_value = byte::byteswap_for_storage(result);
+					return wproc_status::Ok;
+				}
+				else
+				{
+					return wproc_status::Error;
+				}
+			}
 			return wproc_type::Static;
 		}
 		rproc_result rproc(proc_opcode, proc_param) const noexcept { return View(); }
@@ -108,7 +121,7 @@ namespace rdb::type
 
 	template<cmp::ConstString UniqueName, typename Type> requires std::is_trivial_v<Type>
 	class Scalar :
-		public ScalarBase<Type>,
+		public ScalarBase<Scalar<UniqueName, Type>, Type>,
 		public Interface<Scalar<UniqueName, Type>, UniqueName>
 	{ };
 
@@ -123,6 +136,8 @@ namespace rdb::type
 	using Int64 = Scalar<"i64", std::uint64_t>;
 
 	using Byte = Uint8;
+	using Hash = Uint64;
+	using Boolean = Scalar<"bool", bool>;
 	using Character = Scalar<"char", char>;
 	using U8Character = Scalar<"char8", char8_t>;
 	using U16Character = Scalar<"char16", char16_t>;

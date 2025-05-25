@@ -61,9 +61,37 @@ namespace rdb
 
 			return result;
 		}
+
+		template<typename Type>
+		concept stringifiable_member = requires (const Type type)
+		{
+			{ type.to_string() } -> std::same_as<std::string>;
+		};
+		template<typename Type>
+		concept stringifiable_std = requires (const Type type)
+		{
+			{ std::to_string(type) } -> std::same_as<std::string>;
+		};
+
+		template<typename Type>
+		concept stringifiable =
+			(stringifiable_member<Type> || stringifiable_std<Type>);
 	}
 	namespace uuid
 	{
+		struct uint128_t
+		{
+			std::uint64_t low;
+			std::uint64_t high;
+
+			std::string to_string() const noexcept;
+
+			std::span<const unsigned char> view() const noexcept;
+			std::span<unsigned char> view() noexcept;
+
+			constexpr auto operator<=>(const uint128_t& copy) const noexcept = default;
+		};
+
 		constexpr auto table_compact = std::string_view(
 			"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz~`!@#$%^&*()_+-={}[]';?,"
 		);
@@ -83,7 +111,8 @@ namespace rdb
 
 		std::uint64_t random_machine() noexcept;
 		std::uint64_t stable_machine() noexcept;
-		std::array<unsigned char, 16> ugen(std::uint64_t machine) noexcept;
+		uint128_t ugen(std::uint64_t machine) noexcept;
+		uint128_t ugen() noexcept;
 
 		std::size_t decode(const std::string& uuid, std::string_view table) noexcept;
 		std::string encode(std::size_t id, std::string_view table) noexcept;
@@ -675,6 +704,23 @@ namespace rdb
 			return (std::chrono::duration_cast<
 				std::chrono::nanoseconds
 			>(end - beg)) / its;
+		}
+
+		template<cmp::stringifiable_member Type>
+		std::string to_string(const Type& value)
+		{
+			return value.to_string();
+		}
+		template<cmp::stringifiable_std Type>
+		std::string to_string(const Type& value)
+		{
+			return std::to_string(value);
+		}
+
+		template<cmp::stringifiable_member Type>
+		std::ostream& operator<<(std::ostream& os, const Type& value)
+		{
+			return os << value.to_string();
 		}
 	}
 }

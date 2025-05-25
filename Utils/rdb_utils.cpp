@@ -6,10 +6,13 @@
 #include <thread>
 #include <atomic>
 #include <chrono>
+#include <sstream>
+#include <iomanip>
 #ifdef __unix__
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <netpacket/packet.h>
+#include <sys/random.h>
 #else
 #error(Unsupported platform)
 #endif
@@ -18,6 +21,29 @@ namespace rdb
 {
 	namespace uuid
 	{
+		std::string uint128_t::to_string() const noexcept
+		{
+			std::stringstream out;
+			out << std::hex << std::setw(16) << std::setfill('0') << low
+				<< std::hex << std::setw(16) << std::setfill('0') << high;
+			return out.str();
+		}
+
+		std::span<const unsigned char> uint128_t::view() const noexcept
+		{
+			return std::span(
+				reinterpret_cast<const unsigned char*>(&low),
+				sizeof(std::uint64_t) * 2
+			);
+		}
+		std::span<unsigned char> uint128_t::view() noexcept
+		{
+			return std::span(
+				reinterpret_cast<unsigned char*>(&low),
+				sizeof(std::uint64_t) * 2
+			);
+		}
+
 		std::uint64_t random_machine() noexcept
 		{
 			static const std::uint64_t machine = []() {
@@ -39,38 +65,41 @@ namespace rdb
 		std::uint64_t stable_machine() noexcept
 		{
 			static const std::uint64_t machine = []() {
-				ifaddrs* ifaddr = nullptr;
-				if (getifaddrs(&ifaddr) == -1)
-					return random_machine();
+#				ifdef __unix__
+					ifaddrs* ifaddr = nullptr;
+					if (getifaddrs(&ifaddr) == -1)
+						return random_machine();
 
-				std::uint64_t id = random_machine();
-				for (const auto* ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next)
-				{
-					if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_PACKET)
-						continue;
-
-					const sockaddr_ll* ptr = reinterpret_cast<const sockaddr_ll*>(ifa->ifa_addr);
-					if (ptr->sll_halen == 8 && (ifa->ifa_flags & IFF_LOOPBACK) == 0)
+					std::uint64_t id = random_machine();
+					for (const auto* ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next)
 					{
-						std::memcpy(&id, ptr->sll_addr, 8);
-						break;
-					}
-				}
-				freeifaddrs(ifaddr);
+						if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_PACKET)
+							continue;
 
-				return id;
+						const sockaddr_ll* ptr = reinterpret_cast<const sockaddr_ll*>(ifa->ifa_addr);
+						if (ptr->sll_halen == 8 && (ifa->ifa_flags & IFF_LOOPBACK) == 0)
+						{
+							std::memcpy(&id, ptr->sll_addr, 8);
+							break;
+						}
+					}
+					freeifaddrs(ifaddr);
+
+					return id;
+#				endif
 			}();
 			return machine;
 		}
 
-		std::array<unsigned char, 16> ugen(std::uint64_t machine) noexcept
+		uint128_t ugen(std::uint64_t machine) noexcept
 		{
 			using time_ratio = std::chrono::duration<int64_t, std::ratio<1, 10'000'000>>;
 
 			static std::atomic<std::uint16_t> idx = 0;
 			static std::atomic<std::chrono::system_clock::time_point::rep> prev{};
 
-			std::array<unsigned char, 16> result{};
+			uint128_t result;
+			auto view = result.view();
 
 			const auto time = std::chrono::duration_cast<time_ratio>(
 				std::chrono::system_clock::now().time_since_epoch()
@@ -90,29 +119,35 @@ namespace rdb
 
 			// 64-bits - 8 bytes - time since epoch
 
-			result[off++] = static_cast<std::uint8_t>(ptime & 0xFF);
-			result[off++] = static_cast<std::uint8_t>((ptime >> 8) & 0xFF);
-			result[off++] = static_cast<std::uint8_t>((ptime >> 16) & 0xFF);
-			result[off++] = static_cast<std::uint8_t>((ptime >> 24) & 0xFF);
-			result[off++] = static_cast<std::uint8_t>((ptime >> 32) & 0xFF);
-			result[off++] = static_cast<std::uint8_t>((ptime >> 40) & 0xFF);
-			result[off++] = static_cast<std::uint8_t>((ptime >> 48) & 0xFF);
-			result[off++] = static_cast<std::uint8_t>((ptime >> 56) & 0xFF);
+			view[off++] = static_cast<std::uint8_t>(ptime & 0xFF);
+			view[off++] = static_cast<std::uint8_t>((ptime >> 8) & 0xFF);
+			view[off++] = static_cast<std::uint8_t>((ptime >> 16) & 0xFF);
+			view[off++] = static_cast<std::uint8_t>((ptime >> 24) & 0xFF);
+			view[off++] = static_cast<std::uint8_t>((ptime >> 32) & 0xFF);
+			view[off++] = static_cast<std::uint8_t>((ptime >> 40) & 0xFF);
+			view[off++] = static_cast<std::uint8_t>((ptime >> 48) & 0xFF);
+			view[off++] = static_cast<std::uint8_t>((ptime >> 56) & 0xFF);
 
 			// 48-bits - 6 bytes - machine identifier (64-bits)
 
-			result[off++] = static_cast<std::uint8_t>(machine & 0xFF);
-			result[off++] = static_cast<std::uint8_t>((machine >> 8) & 0xFF) ^ static_cast<std::uint8_t>((machine >> 48) & 0xFF);
-			result[off++] = static_cast<std::uint8_t>((machine >> 16) & 0xFF);
-			result[off++] = static_cast<std::uint8_t>((machine >> 24) & 0xFF);
-			result[off++] = static_cast<std::uint8_t>((machine >> 32) & 0xFF);
-			result[off++] = static_cast<std::uint8_t>((machine >> 40) & 0xFF) ^ static_cast<std::uint8_t>((machine >> 56) & 0xFF);
+			view[off++] = static_cast<std::uint8_t>(machine & 0xFF);
+			view[off++] = static_cast<std::uint8_t>((machine >> 8) & 0xFF) ^ static_cast<std::uint8_t>((machine >> 48) & 0xFF);
+			view[off++] = static_cast<std::uint8_t>((machine >> 16) & 0xFF);
+			view[off++] = static_cast<std::uint8_t>((machine >> 24) & 0xFF);
+			view[off++] = static_cast<std::uint8_t>((machine >> 32) & 0xFF);
+			view[off++] = static_cast<std::uint8_t>((machine >> 40) & 0xFF) ^ static_cast<std::uint8_t>((machine >> 56) & 0xFF);
 
 			// 16-bits - 2 bytes - clock sequence
 
-			result[off++] = static_cast<std::uint8_t>(clock & 0xFF);
-			result[off++] = static_cast<std::uint8_t>((clock >> 8) & 0xFF);
+			view[off++] = static_cast<std::uint8_t>(clock & 0xFF);
+			view[off++] = static_cast<std::uint8_t>((clock >> 8) & 0xFF);
 
+			return result;
+		}
+		uint128_t ugen() noexcept
+		{
+			uint128_t result;
+			getrandom(&result, sizeof(result), 0x00);
 			return result;
 		}
 

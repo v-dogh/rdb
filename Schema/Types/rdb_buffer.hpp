@@ -129,6 +129,11 @@ namespace rdb::type
 			std::size_t size{};
 		};
 	private:
+		static constexpr auto _is_string =
+			std::is_same_v<Type, Character> ||
+			std::is_same_v<Type, U8Character> ||
+			std::is_same_v<Type, U16Character> ||
+			std::is_same_v<Type, U32Character>;
 		static constexpr auto _sbo_max =
 			(sizeof(std::uint64_t) * 2 - 1) / Type::static_storage();
 		static constexpr auto _volume_mask =
@@ -362,6 +367,21 @@ namespace rdb::type
 			}
 		}
 
+		static auto mstorage(std::basic_string_view<typename Type::value_type> value)
+			requires _is_string
+		{
+			return mstorage(Reserve(value.size()));
+		}
+		static auto mstorage(const typename Type::value_type* ptr)
+			requires _is_string
+		{
+			return mstorage(
+				std::basic_string_view<
+					typename Type::value_type
+				>(ptr)
+			);
+		}
+
 		template<typename... Argv>
 		static auto minline(std::span<unsigned char> view, Argv&&... args) noexcept
 		{
@@ -374,8 +394,13 @@ namespace rdb::type
 			_set_dims(0, 0);
 		}
 		template<typename Arg, typename... Argv>
-		BufferBase(Arg&& arg, Argv&&... args)
-			requires (!std::is_same_v<Arg, Reserve> && !std::is_same_v<Arg, list>)
+		explicit BufferBase(Arg&& arg, Argv&&... args)
+			requires (
+				!std::is_same_v<std::decay_t<Arg>, Reserve> &&
+				!std::is_same_v<std::decay_t<Arg>, list> &&
+				!std::is_same_v<std::decay_t<Arg>, const typename Type::value_type*> &&
+				!std::is_same_v<std::decay_t<Arg>, std::basic_string_view<typename Type::value_type>>
+			)
 		{
 			_set_size(sizeof...(Argv) + 1);
 			std::size_t off = 0;
@@ -391,7 +416,7 @@ namespace rdb::type
 			(write(std::forward<Argv>(args)), ...);
 			_set_volume(off, sizeof...(Argv) + 1);
 		}
-		BufferBase(list res)
+		explicit BufferBase(list res)
 		{
 			_set_size(res.size());
 			std::size_t off = 0;
@@ -407,9 +432,23 @@ namespace rdb::type
 			}
 			_set_volume(off, res.size());
 		}
-		BufferBase(const Reserve& res)
+		explicit BufferBase(const Reserve& res)
 		{
 			_set_dims(res.size, res.size * Type::mstorage());
+		}
+		explicit BufferBase(typename Type::value_type* ptr)
+			requires _is_string : BufferBase(
+				std::basic_string_view<typename Type::value_type>(ptr)
+			) {}
+		explicit BufferBase(std::basic_string_view<typename Type::value_type> str)
+			requires _is_string
+		{
+			_set_dims(str.size(), str.size() * Type::static_storage());
+			std::memcpy(
+				_buffer(),
+				str.data(),
+				str.size() * sizeof(typename Type::value_type)
+			);
 		}
 
 		enum rOp : proc_opcode
@@ -419,7 +458,9 @@ namespace rdb::type
 		};
 		enum wOp : proc_opcode
 		{
+			// [ Offset, Values ]
 			Insert = 'i',
+			// [ Offset, Value ]
 			Write = 'w'
 		};
 		enum fOp : proc_opcode
@@ -533,16 +574,10 @@ namespace rdb::type
 		}
 		std::string print() const noexcept
 		{
-			if constexpr (
-				std::is_same_v<Type, Character> ||
-				std::is_same_v<Type, U8Character> ||
-				std::is_same_v<Type, U16Character> ||
-				std::is_same_v<Type, U32Character>
-			)
+			if constexpr (_is_string)
 			{
-				using type = std::remove_cvref_t<decltype(std::declval<Type>().value())>;
 				return std::format("'{}'",
-					std::basic_string_view<type>(
+					std::basic_string_view<typename Type::value_type>(
 						_buffer()->underlying(), _size() + 1
 					)
 				);
@@ -585,7 +620,69 @@ namespace rdb::type
 		}
 		bool fproc(proc_opcode opcode, proc_param arguments) const noexcept
 		{
+			TypedView<BufferBase> other = TypedView<BufferBase>::view(
+				arguments.data()
+			);
+			if constexpr (_is_string)
+			{
+				const auto result = std::lexicographical_compare_three_way(
+					begin(), end(), other->begin(), other->end()
+				);
+				if (opcode == fOp::Smaller) return result < 0;
+				else if (opcode == fOp::Larger) return result > 0;
+				else if (opcode == fOp::Equal) return result == 0;
+			}
+			else
+			{
+				if (opcode == fOp::Equal)
+				{
+					auto it1 = begin();
+					auto end1 = end();
+					auto it2 = other->begin();
+					auto end2 = other->end();
+					while (it1 != end1 && it2 != end2)
+					{
+						if (!it1->fproc(
+								proc_opcode(SortFilterOp::Equal),
+								it2->view()
+							))
+						{
+							return false;
+						}
+						++it1;
+						++it2;
+					}
+				}
+				else
+				{
+					auto it1 = begin();
+					auto end1 = end();
+					auto it2 = other->begin();
+					auto end2 = other->end();
+					while (it1 != end1 && it2 != end2)
+					{
+						if (!it1->fproc(
+								proc_opcode(SortFilterOp::Equal),
+								it2->view()
+							))
+						{
+							break;
+						}
+						++it1;
+						++it2;
+					}
 
+					const auto is_larger =
+						it1->fproc(
+							proc_opcode(SortFilterOp::Larger),
+							it2->view()
+						);
+
+					if (opcode == fOp::Smaller) return !is_larger;
+					else if (opcode == fOp::Larger) return is_larger;
+				}
+			}
+			return true;
 		}
 	};
 

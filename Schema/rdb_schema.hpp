@@ -42,6 +42,8 @@ namespace rdb
 		{ v.storage() } -> std::same_as<std::size_t>;
 		// Returns a hash of the data
 		{ v.hash() } -> std::same_as<hash_type>;
+		// Returns a view to the entire object
+		{ v.view() } -> std::same_as<View>;
 		// Write and read procedures are used for performing any kind of operation on an object
 		// Filtering procedures are used for comparison
 		// They are meant to be trivially serializable so they can be easily transferred over the network and/or logged
@@ -85,6 +87,27 @@ namespace rdb
 				static constexpr auto key = IndexImpl<Idx, Keys...>::key;
 			};
 
+			template<cmp::ConstString Search, cmp::ConstString Key, cmp::ConstString... Rest>
+			struct HasKeyImpl :
+				std::conditional_t<
+					Search == Key,
+					std::true_type,
+					std::conditional_t<
+						sizeof...(Rest) == 0,
+						std::false_type,
+						HasKeyImpl<Search, Rest...>
+					>
+				>
+			{ };
+
+			template<cmp::ConstString Key>
+			struct HasKey
+			{
+				static constexpr auto is = HasKeyImpl<Key, Keys...>::value;
+			};
+
+			template<cmp::ConstString Key>
+			static constexpr auto has = HasKey<Key>::is;
 			static constexpr auto count = sizeof...(Keys);
 		};
 	}
@@ -128,12 +151,15 @@ namespace rdb
 		static constexpr auto sort_count = SKey::count;
 		template<std::size_t Idx>
 		static constexpr auto sort_order = KeyOrdering<Idx>::order;
+		template<cmp::ConstString Key>
+		static constexpr auto has =
+			PKey::template has<Key> || SKey::template has<Key>;
 	};
 
 	template<typename Base>
 	class InterfaceHelper
 	{
-	public:
+	protected:
 		const void* _dynamic_field() const noexcept
 		{
 			return static_cast<const Base*>(this + 1);
@@ -209,6 +235,21 @@ namespace rdb
 		Interface() = default;
 		Interface(const Interface&) = delete;
 		Interface(Interface&&) = delete;
+
+		View view() const noexcept
+		{
+			return View::view(std::span(
+				reinterpret_cast<const unsigned char*>(this),
+				static_cast<const Base*>(this)->storage()
+			));
+		}
+		View view() noexcept
+		{
+			return View::view(std::span(
+				reinterpret_cast<unsigned char*>(this),
+				static_cast<Base*>(this)->storage()
+			));
+		}
 	};
 
 	template<cmp::ConstString Name, InterfaceType Inf>
@@ -310,17 +351,17 @@ namespace rdb
 				std::size_t len = 0;
 				([&]<typename Field>()
 				{
-					if constexpr (Field::name != Name.view())
+					if constexpr (Field::uname != Name.view())
 					{
-						len = _at<Field>(off).storage();
+						len = _at<Field>(off)->storage();
 						return true;
 					}
 					else
 					{
-						off += _at<Field>(off).storage();
+						off += _at<Field>(off)->storage();
 						return false;
 					}
-				}.template operator()<Fields::interface>() || ...);
+				}.template operator()<typename Fields::interface>() || ...);
 
 				return TypedView<typename field::interface>::view(
 					std::span(
@@ -349,17 +390,17 @@ namespace rdb
 				std::size_t len = 0;
 				([&]<typename Field>()
 				{
-					if constexpr (Field::name != Name.view())
+					if constexpr (Field::uname != Name.view())
 					{
-						len = _at<Field>(off).storage();
+						len = _at<Field>(off)->storage();
 						return true;
 					}
 					else
 					{
-						off += _at<Field>(off).storage();
+						off += _at<Field>(off)->storage();
 						return false;
 					}
-				}.template operator()<Fields::interface>() || ...);
+				}.template operator()<typename Fields::interface>() || ...);
 
 				return TypedView<typename field::interface>::view(
 					std::span(
