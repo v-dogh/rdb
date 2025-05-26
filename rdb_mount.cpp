@@ -24,8 +24,8 @@ namespace rdb
 		if (_status == Status::Running)
 			return;
 
-		_threads.resize(_cfg.mnt.cores + 1);
-		for (std::size_t i = 0; i < _cfg.mnt.cores + 1; i++)
+		_threads.resize(_cfg.mnt.cores);
+		for (std::size_t i = 0; i < _cfg.mnt.cores; i++)
 		{	
 			_threads[i].sem = Thread::make_sem();
 			_threads[i].thread = std::thread([this, i]() {
@@ -165,13 +165,24 @@ namespace rdb
 			if (packet.size() < sizeof(cmd::qOp) + sizeof(key_type) + sizeof(schema_type))
 				return packet.size() - off;
 
-			const auto key = byte::sread<key_type>(packet.data(), off);
 			const auto schema = byte::sread<schema_type>(packet.data(), off);
 			const auto* info = RuntimeSchemaReflection::fetch(schema);
 			if (info == nullptr)
 				return packet.size() - off;
 
+			key_type key = 0x00;
+			View pkey = nullptr;
 			View sort = nullptr;
+			// Get partition key
+			{
+				const auto size = info->partition_size(
+					View::view(packet.subspan(off))
+				);
+				pkey = View::view(packet.subspan(off, size));
+				off += size;
+				key = info->hash_partition(pkey);
+			}
+			// Get sort keys
 			if (info->skeys())
 			{
 				std::size_t size = 0;
@@ -190,7 +201,7 @@ namespace rdb
 			std::size_t coff = 0;
 			while ((coff = _query_parse_schema_operator(
 					packet.subspan(off),
-					key, sort,
+					key, pkey, sort,
 					schema,
 					state,
 					inf
@@ -203,7 +214,7 @@ namespace rdb
 		}
 		return off;
 	}
-	std::size_t Mount::_query_parse_schema_operator(std::span<const unsigned char> packet, key_type key, View sort, schema_type schema, ParserState& state, ParserInfo& info) noexcept
+	std::size_t Mount::_query_parse_schema_operator(std::span<const unsigned char> packet, key_type key, View partition, View sort, schema_type schema, ParserState& state, ParserInfo& info) noexcept
 	{
 		const auto op = cmd::qOp(packet[0]);
 		auto& core = _threads[_vcpu(key)];
@@ -212,9 +223,25 @@ namespace rdb
 		{
 			state.acquire();
 			core.launch(Thread::task(schema, [=, &state, this](MemoryCache* cache) {
-				cache->reset(key, sort);
+				cache->reset(key, partition, sort);
 				state.release();
 			}));
+		}
+		else if (op == cmd::qOp::Rewrite)
+		{
+			const auto len = byte::sread<std::uint32_t>(packet.data(), off);
+			state.acquire();
+			core.launch(Thread::task(schema, [=, &state, this](MemoryCache* cache) {
+				cache->write(
+					WriteType::Table,
+					key, partition, sort,
+					packet.subspan(
+						off, len
+					)
+				);
+				state.release();
+			}));
+			off += len;
 		}
 		else if (op == cmd::qOp::Remove)
 		{
@@ -224,12 +251,11 @@ namespace rdb
 		{
 			off += sizeof(std::uint8_t);
 			const auto len = byte::sread<std::uint32_t>(packet.data(), off);
-
 			state.acquire();
 			core.launch(Thread::task(schema, [=, &state, this](MemoryCache* cache) {
 				cache->write(
 					WriteType::Field,
-					key, sort,
+					key, partition, sort,
 					packet.subspan(
 						off - sizeof(std::uint8_t),
 						len + sizeof(std::uint8_t)
@@ -276,7 +302,7 @@ namespace rdb
 			core.launch(Thread::task(schema, [=, &state, this](MemoryCache* cache) {
 				cache->write(
 					WriteType::WProc,
-					key, sort,
+					key, partition, sort,
 					packet.subspan(sizeof(cmd::qOp), sizeof(std::uint8_t) + sizeof(proc_opcode) + len)
 				);
 				state.release();

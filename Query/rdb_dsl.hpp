@@ -18,6 +18,7 @@
 // <read>
 // <dump>
 // <reset>
+// <rewrite>
 // <wproc>
 // <rproc>
 // *Filter
@@ -29,27 +30,6 @@
 // -signal the interpreter
 // <atomic>
 // <execute>
-/*
-	<rdb::compose is purely syntactic sugar since '<<' has precedence over '|'>
-	auto barrier = db.query
-		<< rdb::compose(rdb::fetch<Schema>("userA")
-			| rdb::write<"FieldA">(0)
-			| rdb::write<"FieldB">("value")
-			| rdb::read<"FieldC">([](const auto& value) {
-				...
-			  }))
-		<< rdb::compose(rdb::fetch<Schema>("userB")
-			| rdb::if<
-				rdb::is<"FieldA", rdb::null>,
-				rdb::write<"FieldA">(666)
-			>
-		<< rdb::compose(rdb::fetch<Schema>("userB")
-			| rdb::write<"FieldD">("meow")
-			| rdb::read<"FieldQ">(&out))
-		<< rdb::execute<rdb::Policy::Async>
-	(...)
-	barrier.sync(); <if policy is Sync the query returns itself>
-*/
 
 #include <memory_resource>
 #include <functional>
@@ -125,7 +105,13 @@ namespace rdb
 	}
 	namespace cmd
 	{
-		using compound_key = std::pair<key_type, StackView<128>>;
+		template<typename Type>
+		struct is_typed_view : std::false_type {};
+
+		template<typename Type>
+		struct is_typed_view<TypedView<Type>> : std::true_type {};
+
+		using compound_key = std::pair<StackView<64>, StackView<64>>;
 
 		template<typename Schema>
 		struct Fetch
@@ -144,16 +130,16 @@ namespace rdb
 				return
 					sizeof(qOp) +
 					sizeof(schema_type) +
-					sizeof(key_type) +
+					key.first.size() +
 					key.second.size();
 			}
 			template<typename>
-			constexpr auto fill(std::span<unsigned char> buffer) const noexcept
+			constexpr auto fill(std::span<unsigned char> buffer) noexcept
 			{
 				buffer[0] = char(qOp::Fetch);
 				std::size_t off = sizeof(qOp);
-				off += byte::swrite<key_type>(buffer, off, key.first);
 				off += byte::swrite<schema_type>(buffer, off, Schema::ucode);
+				off += byte::swrite(buffer, off, key.first.data());
 				off += byte::swrite(buffer, off, key.second.data());
 				return off;
 			}
@@ -174,15 +160,117 @@ namespace rdb
 				return sizeof(qOp);
 			}
 			template<typename>
-			constexpr auto fill(std::span<unsigned char> buffer) const noexcept
+			constexpr auto fill(std::span<unsigned char> buffer) noexcept
 			{
 				buffer[0] = char(qOp::Reset);
 				return sizeof(qOp);
 			}
 		};
 
-		template<cmp::ConstString Field, typename Type>
+		template<typename... Argv>
+		struct Rewrite
+		{
+			std::tuple<std::decay_t<Argv>...> data;
+
+			template<typename Schema>
+			constexpr auto size() const noexcept
+			{
+				return
+					sizeof(qOp) +
+					sizeof(std::uint32_t) +
+					std::apply([](auto&&... args) {
+						return Schema::mstorage(args...);
+					}, data);
+			}
+			template<typename Schema>
+			constexpr auto fill(std::span<unsigned char> buffer) noexcept
+			{
+				std::size_t off = sizeof(qOp);
+				buffer[0] = char(qOp::Reset);
+				off += byte::swrite<std::uint32_t>(buffer, off,
+					std::apply([](auto&&... args) {
+						return Schema::mstorage(args...);
+					}, data)
+				);
+				off += byte::swrite(buffer, off,
+					std::apply([](auto&&... args) {
+						return Schema::make(
+							std::forward<Argv>(args)...
+						);
+					}, data)
+				);
+				return sizeof(qOp) + off;
+			}
+		};
+
+		template<typename Type>
+		struct RewriteView
+		{
+			Type data;
+
+			template<typename Schema>
+			constexpr auto size() const noexcept
+			{
+				return
+					sizeof(qOp) +
+					sizeof(std::uint32_t) +
+					data.size();
+			}
+			template<typename Schema>
+			constexpr auto fill(std::span<unsigned char> buffer) noexcept
+			{
+				std::size_t off = sizeof(qOp);
+				buffer[0] = char(qOp::Reset);
+				off += byte::swrite<std::uint32_t>(buffer, off, data.size());
+				off += byte::swrite(buffer, off, data);
+				return sizeof(qOp) + off;
+			}
+		};
+
+		template<cmp::ConstString Field, typename... Argv>
 		struct Write
+		{
+			static constexpr auto field = *Field;
+			std::tuple<Argv...> data{};
+
+			template<typename Schema>
+			constexpr auto size() const noexcept
+			{
+				static_assert(!Schema::topology::template has<Field>, "Cannot write to a key field");
+				return
+					sizeof(qOp) +
+					sizeof(std::uint8_t) +
+					sizeof(std::uint32_t) +
+					std::apply([](auto&&... args) {
+						return Schema::
+							template interface<Field>::mstorage(args...);
+					}, data);
+			}
+			template<typename Schema>
+			constexpr auto fill(std::span<unsigned char> buffer) noexcept
+			{
+				buffer[0] = char(qOp::Write);
+				buffer[1] = static_cast<std::uint8_t>(Schema::template index_of<Field>());
+				std::size_t off = sizeof(qOp) + sizeof(std::uint8_t);
+				off += byte::swrite<std::uint32_t>(buffer, off,
+					std::apply([](auto&&... args) {
+						return Schema::
+							template interface<Field>::mstorage(args...);
+					}, data)
+				);
+				off += byte::swrite(buffer, off,
+					std::apply([](auto&&... args) {
+						return Schema::template interface<Field>::make(
+							std::forward<Argv>(args)...
+						);
+					}, data)
+				);
+				return off;
+			}
+		};
+
+		template<cmp::ConstString Field, typename Type>
+		struct WriteView
 		{
 			static constexpr auto field = *Field;
 			Type data{};
@@ -190,39 +278,7 @@ namespace rdb
 			template<typename Schema>
 			constexpr auto size() const noexcept
 			{
-				return
-					sizeof(qOp) +
-					sizeof(std::uint8_t) +
-					sizeof(std::uint32_t) +
-					Schema::template interface<Field>::mstorage(data);
-			}
-			template<typename Schema>
-			constexpr auto fill(std::span<unsigned char> buffer) const noexcept
-			{
-				buffer[0] = char(qOp::Write);
-				buffer[1] = static_cast<std::uint8_t>(Schema::template index_of<Field>());
-				std::size_t off = sizeof(qOp) + sizeof(std::uint8_t);
-				off += byte::swrite<std::uint32_t>(buffer, off,
-					Schema::template interface<Field>::mstorage(data)
-				);
-				off += byte::swrite(buffer, off,
-					Schema::template interface<Field>::make(
-						std::move(data)
-					)
-				);
-				return off;
-			}
-		};
-
-		template<cmp::ConstString Field, typename Type>
-		struct Write<Field, TypedView<Type>>
-		{
-			static constexpr auto field = *Field;
-			TypedView<Type> data{};
-
-			template<typename Schema>
-			constexpr auto size() const noexcept
-			{
+				static_assert(!Schema::topology::template has<Field>, "Cannot write to a key field");
 				return
 					sizeof(qOp) +
 					sizeof(std::uint8_t) +
@@ -230,7 +286,7 @@ namespace rdb
 					data.size();
 			}
 			template<typename Schema>
-			constexpr auto fill(std::span<unsigned char> buffer) const noexcept
+			constexpr auto fill(std::span<unsigned char> buffer) noexcept
 			{
 				buffer[0] = char(qOp::Write);
 				buffer[1] = static_cast<std::uint8_t>(Schema::template index_of<Field>());
@@ -250,6 +306,7 @@ namespace rdb
 			template<typename Schema>
 			constexpr auto size() const noexcept
 			{
+				static_assert(!Schema::topology::template has<Field>, "Cannot write to a key field");
 				return
 					sizeof(qOp) +
 					sizeof(std::uint8_t) +
@@ -258,7 +315,7 @@ namespace rdb
 					Schema::template interface<Field>::mstorage(data);
 			}
 			template<typename Scheme>
-			constexpr auto fill(std::span<unsigned char> buffer) const noexcept
+			constexpr auto fill(std::span<unsigned char> buffer) noexcept
 			{
 				buffer[0] = char(qOp::WProc);
 				buffer[1] = static_cast<std::uint8_t>(Scheme::template index_of<Field>());
@@ -289,7 +346,7 @@ namespace rdb
 					sizeof(std::uint8_t);
 			}
 			template<typename Schema>
-			constexpr auto fill(std::span<unsigned char> buffer) const noexcept
+			constexpr auto fill(std::span<unsigned char> buffer) noexcept
 			{
 				buffer[0] = char(qOp::Read);
 				buffer[1] = static_cast<std::uint8_t>(Schema::template index_of<Field>());
@@ -329,18 +386,18 @@ namespace rdb
 		constexpr cmd::compound_key keyset(Argv&&... keys) noexcept
 		{
 			std::tuple args = std::forward_as_tuple(std::forward<Argv>(keys)...);
+			cmd::compound_key result;
 			return {
-				[&args]
-					<std::size_t... Idv>(std::index_sequence<Idv...>)
+				[&]<std::size_t... Idv>(std::index_sequence<Idv...>)
 				{
-					return uuid::xxhash_combine({
+					return std::tuple_element_t<1, cmd::compound_key>::combine_views(
 						Schema::template interface<
-							Schema::keyset::template partition<Idv>
+							Schema::topology::template partition<Idv>
 						>::make(
 							std::get<Idv>(args)
-						)->hash()...
-					});
-				}(std::make_index_sequence<Schema::keyset::partition_count>()),
+						)...
+					);
+				}(std::make_index_sequence<Schema::topology::partition_count>()),
 				[&args]
 					<std::size_t... Idv>(std::index_sequence<Idv...>)
 				{
@@ -353,17 +410,17 @@ namespace rdb
 						cmd::compound_key::second_type view =
 							cmd::compound_key::second_type::copy(
 								(Schema::template interface<
-									Schema::keyset::template sort<Idv>
+									Schema::topology::template sort<Idv>
 								>::mstorage(
-									std::get<Schema::keyset::partition_count + Idv>(args)
+									std::get<Schema::topology::partition_count + Idv>(args)
 								) + ...)
 							);
 						std::size_t off = 0;
 						([&]<std::size_t Idx>() mutable {
 							auto value = (Schema::template interface<
-								Schema::keyset::template sort<Idv>
+								Schema::topology::template sort<Idv>
 							>::make(
-								std::get<Schema::keyset::partition_count + Idx>(args))
+								std::get<Schema::topology::partition_count + Idx>(args))
 							);
 							off += byte::swrite(view.mutate(), off,
 								value
@@ -371,7 +428,7 @@ namespace rdb
 						}.template operator()<Idv>(), ...);
 						return view;
 					}
-				}(std::make_index_sequence<Schema::keyset::sort_count>()),
+				}(std::make_index_sequence<Schema::topology::sort_count>())
 			};
 		}
 		template<typename Schema, typename... Ops>
@@ -382,7 +439,7 @@ namespace rdb
 			}, chain.ops);
 		}
 		template<typename Schema, typename... Ops>
-		constexpr void fill(const OperationChain<cmd::Fetch<Schema>, Ops...>& chain, std::span<unsigned char> buffer) noexcept
+		constexpr void fill(OperationChain<cmd::Fetch<Schema>, Ops...>& chain, std::span<unsigned char> buffer) noexcept
 		{
 			std::apply([&](auto&... ops) {
 				std::size_t idx = 0;
@@ -423,10 +480,38 @@ namespace rdb
 
 	constexpr auto reset = cmd::Reset();
 
-	template<cmp::ConstString Field, typename Value>
-	constexpr auto write(Value&& value) noexcept
+	template<typename... Argv>
+	constexpr auto rewrite(Argv&&... args) noexcept
 	{
-		return cmd::Write<Field, std::remove_cvref_t<Value>>(std::forward<Value>(value));
+		if constexpr (sizeof...(Argv) == 1 && (cmd::is_typed_view<Argv>::value && ...))
+		{
+			return cmd::RewriteView<Argv...>(
+				std::forward<Argv>(args)...
+			);
+		}
+		else
+		{
+			return cmd::Rewrite<Argv...>(
+				std::forward_as_tuple(std::forward<Argv>(args)...)
+			);
+		}
+	}
+
+	template<cmp::ConstString Field, typename... Argv>
+	constexpr auto write(Argv&&... args) noexcept
+	{
+		if constexpr (sizeof...(Argv) == 1 && (cmd::is_typed_view<Argv>::value && ...))
+		{
+			return cmd::WriteView<Field, Argv...>(
+				std::forward<Argv>(args)...
+			);
+		}
+		else
+		{
+			return cmd::Write<Field, Argv...>(
+				std::forward_as_tuple(std::forward<Argv>(args)...)
+			);
+		}
 	}
 
 	template<cmp::ConstString Field, char Op, typename Arg>
@@ -503,17 +588,34 @@ namespace rdb
 			else if (task.valid())
 				task.wait();
 		}
-		static std::pmr::vector<unsigned char>& _qbuffer(bool reset = false) noexcept
+		static std::span<unsigned char> _qbuffer(std::size_t require) noexcept
 		{
-			thread_local std::array<unsigned char, 1024> pool;
-			thread_local std::pmr::monotonic_buffer_resource resource(pool.data(), pool.size());
-			thread_local std::pmr::vector<unsigned char> out(&resource);
-			if (reset)
+			thread_local std::unique_ptr<unsigned char[]> dynamic_buffer{ nullptr };
+			thread_local unsigned char static_buffer[1024]{};
+			thread_local unsigned char* buffer = static_buffer;
+			thread_local std::size_t ptr = 0;
+			thread_local std::size_t capacity = 1024;
+			if (require == 0)
 			{
-				out.clear();
-				resource.release();
+				ptr = 0;
+				return std::span<unsigned char>();
 			}
-			return out;
+			else if (require != ~0ull)
+			{
+				const auto s = std::span(buffer + ptr, require);
+				ptr += require;
+				[[ unlikely ]] if (ptr > capacity)
+				{
+					capacity *= 2;
+					dynamic_buffer.reset(new unsigned char[capacity]);
+					buffer = dynamic_buffer.get();
+				}
+				return s;
+			}
+			else
+			{
+				return std::span(buffer, ptr);
+			}
 		}
 		static std::unique_ptr<ReadChainStore> _build_store(ReadChainStore::func_type func) noexcept
 		{
@@ -540,55 +642,55 @@ namespace rdb
 			if constexpr (std::is_same_v<std::remove_cvref_t<Type>, cmd::Flush>)
 			{
 				_sync();
-				_qbuffer(true);
+				_qbuffer(0);
 				return *this;
 			}
 			else if constexpr (std::is_same_v<std::remove_cvref_t<Type>, cmd::Execute<Policy::Sync>>)
 			{
-				static_cast<Base*>(this)->query_sync(_qbuffer(), _build_store(nullptr));
-				_qbuffer(true);
+				static_cast<Base*>(this)->query_sync(
+					_qbuffer(~0ull), _build_store(nullptr)
+				);
+				_qbuffer(0);
 				return *this;
 			}
 			else if constexpr (std::is_same_v<std::remove_cvref_t<Type>, cmd::Execute<Policy::Async>>)
 			{
-				auto f = static_cast<Base*>(this)->query_async(_qbuffer(), _build_store(nullptr));
-				_qbuffer(true);
+				auto f = static_cast<Base*>(this)->query_async(
+					_qbuffer(~0ull), _build_store(nullptr)
+				);
+				_qbuffer(0);
 				_sync(f);
 				return f;
 			}
 			else
 			{
-				thread_local auto off = 0;
-
 				// Writes
 
 				_sync();
-				if (_qbuffer().empty()) off = 0;
 				const auto size = impl::size(cmd) + 1;
-				_qbuffer().resize(_qbuffer().size() + size);
+				const auto buffer = _qbuffer(size);
 
 				// Reads
 
 				auto r = cmd.extract();
 				if constexpr (!std::is_same_v<std::remove_cvref_t<decltype(r)>, std::nullptr_t>)
 				{
-					_qbuffer()[off] = OperandFlags::Reads;
+					buffer[0] = OperandFlags::Reads;
 					_build_store(std::move(r));
 				}
 				else
 				{
-					_qbuffer()[off] = 0x00;
+					buffer[0] = 0x00;
 				}
 
 				// Instructions
 
 				impl::fill(cmd,
 					std::span(
-						_qbuffer().begin() + off + 1,
-						_qbuffer().end()
+						buffer.begin() + 1,
+						buffer.end()
 					)
 				);
-				off += size;
 
 				return *this;
 			}

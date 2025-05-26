@@ -7,6 +7,7 @@ namespace rdb::cmd
 	{
 		Fetch = 'f',
 		Reset = 'R',
+		Rewrite = 'N',
 		Remove = 'P',
 		Write = 'w',
 		Read = 'r',

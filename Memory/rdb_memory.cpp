@@ -77,22 +77,27 @@ namespace rdb
 			}
 
 			_logs.replay([this](WriteType type, key_type key, View sort, View data) {
-				if (type == WriteType::Reset)
+				if (type == WriteType::CreatePartition)
+				{
+					RDB_FMT("VCPU{} MCR CREATE PARTITION <{}>", _id, uuid::encode(key, uuid::table_alnum))
+					_create_partition_if(*_map, key, data);
+				}
+				else if (type == WriteType::Reset)
 				{
 					RDB_FMT("VCPU{} MCR RESET <{}>", _id, uuid::encode(key, uuid::table_alnum))
-					_reset_impl(*_map, key, sort);
+					_reset_impl(_find_partition(*_map, key), sort);
 					_flush_if();
 				}
 				else if (type == WriteType::Remov)
 				{
 					RDB_FMT("VCPU{} MCR REMOVE <{}>", _id, uuid::encode(key, uuid::table_alnum))
-					_remove_impl(*_map, key, sort);
+					_remove_impl(_find_partition(*_map, key), sort);
 					_flush_if();
 				}
 				else
 				{
 					RDB_FMT("VCPU{} MCR WRITE <{}>", _id, uuid::encode(key, uuid::table_alnum))
-					_write_impl(*_map, type, key, sort, data);
+					_write_impl(_find_partition(*_map, key), type, sort, data);
 					_flush_if();
 				}
 			});
@@ -210,44 +215,42 @@ namespace rdb
 		}
 	}
 
-	MemoryCache::slot& MemoryCache::_emplace_sorted_slot(write_store& map, hash_type key, View sort) noexcept
+	MemoryCache::slot& MemoryCache::_emplace_sorted_slot(write_store::iterator part, View sort) noexcept
 	{
-		return std::get<partition>(
-			map.emplace(key, _make_partition()).first->second
+		return part->second.second.emplace<partition>(
+			_make_partition()
 		).emplace(View::copy(std::move(sort)), slot()).first->second;
 	}
-	MemoryCache::slot& MemoryCache::_emplace_unsorted_slot(write_store& map, hash_type key) noexcept
+	MemoryCache::slot& MemoryCache::_emplace_unsorted_slot(write_store::iterator partition) noexcept
 	{
-		return std::get<slot>(
-			map.emplace(key, slot()).first->second
-		);
+		return partition->second.second.emplace<slot>();
 	}
-	MemoryCache::slot& MemoryCache::_emplace_slot(write_store& map, hash_type key, View sort) noexcept
+	MemoryCache::slot& MemoryCache::_emplace_slot(write_store::iterator partition, View sort) noexcept
 	{
 		RuntimeSchemaReflection::RTSI& info = RuntimeSchemaReflection::info(_schema);
 		if (info.skeys())
-			return _emplace_sorted_slot(map, key, View::view(sort));
-		return _emplace_unsorted_slot(map, key);
+			return _emplace_sorted_slot(partition, View::view(sort));
+		return _emplace_unsorted_slot(partition);
 	}
 
-	const MemoryCache::slot* MemoryCache::_find_sorted_slot(const write_store& map, hash_type key, View sort) noexcept
+	const MemoryCache::slot* MemoryCache::_find_sorted_slot(const write_store& map, key_type key, View sort) noexcept
 	{
 		auto f = map.find(key);
 		if (f == map.end())
 			return nullptr;
-		auto fp = std::get<partition>(f->second).find(View::view(sort));
-		if (fp == std::get<partition>(f->second).end())
+		auto fp = std::get<partition>(f->second.second).find(View::view(sort));
+		if (fp == std::get<partition>(f->second.second).end())
 			return nullptr;
 		return &fp->second;
 	}
-	const MemoryCache::slot* MemoryCache::_find_unsorted_slot(const write_store& map, hash_type key) noexcept
+	const MemoryCache::slot* MemoryCache::_find_unsorted_slot(const write_store& map, key_type key) noexcept
 	{
 		auto f = map.find(key);
 		if (f == map.end())
 			return nullptr;
-		return &std::get<slot>(f->second);
+		return &std::get<slot>(f->second.second);
 	}
-	const MemoryCache::slot* MemoryCache::_find_slot(const write_store& map, hash_type key, View sort) noexcept
+	const MemoryCache::slot* MemoryCache::_find_slot(const write_store& map, key_type key, View sort) noexcept
 	{
 		RuntimeSchemaReflection::RTSI& info = RuntimeSchemaReflection::info(_schema);
 		if (info.skeys())
@@ -324,7 +327,7 @@ namespace rdb
 		}
 		return cnt;
 	}
-	std::size_t MemoryCache::_read_cache_impl(const write_store& map, hash_type key, View sort, field_bitmap& fields, const read_callback& callback) noexcept
+	std::size_t MemoryCache::_read_cache_impl(const write_store& map, key_type key, View sort, field_bitmap& fields, const read_callback& callback) noexcept
 	{
 		auto f = _find_slot(map, key, sort);
 		if (f == nullptr)
@@ -332,7 +335,7 @@ namespace rdb
 		return _read_entry_impl(View::view(f->second.data()), fields, callback);
 	}
 
-	void MemoryCache::read(hash_type key, View sort, field_bitmap fields, const read_callback& callback) noexcept
+	void MemoryCache::read(key_type key, View sort, field_bitmap fields, const read_callback& callback) noexcept
 	{
 		RDB_FMT("VCPU{} MC READ <{}>", _id, uuid::encode(key, uuid::table_alnum))
 
@@ -497,7 +500,10 @@ namespace rdb
 											off = sparse_offset.value();
 											do
 											{
-												const auto [ eq, size ] = eq_comparator(View::view(sort), View::view(block.subspan(off)));
+												const auto [ eq, size ] = eq_comparator(
+													View::view(sort),
+													View::view(block.subspan(off))
+												);
 												off += size;
 												if (eq)
 												{
@@ -668,9 +674,40 @@ namespace rdb
 		buffer.data()[1]++;
 	}
 
-	void MemoryCache::_write_impl(write_store& map, WriteType type, hash_type key, View sort, std::span<const unsigned char> data) noexcept
+	MemoryCache::write_store::iterator MemoryCache::_create_partition_log_if(write_store& map, key_type key, View partition) noexcept
 	{
-		auto& [ wtype, storage ] = _emplace_slot(map, key, View::view(sort));
+		auto [ it, created ] = map.emplace(
+			key,
+			std::make_pair(
+				View::copy(partition),
+				std::nullopt
+			)
+		);
+		if (created)
+		{
+			RDB_FMT("VCPU{} MC CREATE PARTITION <{}>", _id, uuid::encode(key, uuid::table_alnum))
+			_logs.log(WriteType::CreatePartition, key, partition);
+		}
+		return it;
+	}
+	MemoryCache::write_store::iterator MemoryCache::_create_partition_if(write_store& map, key_type key, View partition) noexcept
+	{
+		return map.emplace(
+			key,
+			std::make_pair(
+				View::copy(partition),
+				std::nullopt
+			)
+		).first;
+	}
+	MemoryCache::write_store::iterator MemoryCache::_find_partition(write_store& map, key_type key) noexcept
+	{
+		return map.find(key);
+	}
+
+	void MemoryCache::_write_impl(write_store::iterator partition, WriteType type, View sort, std::span<const unsigned char> data) noexcept
+	{
+		auto& [ wtype, storage ] = _emplace_slot(partition, View::view(sort));
 		if (storage == nullptr)
 		{
 			if (type == WriteType::Table)
@@ -684,7 +721,7 @@ namespace rdb
 				storage = _make_shared_buffer(type, data);
 				wtype = type;
 			}
-			_pressure += data.size() + sizeof(key) + 32;
+			_pressure += data.size() + sizeof(key_type) + 32;
 		}
 		else if (type == WriteType::Table)
 		{
@@ -723,7 +760,7 @@ namespace rdb
 				else
 				{
 					_merge_field_buffers(type, storage, data);
-					_pressure += data.size() + sizeof(key) + 32;
+					_pressure += data.size() + sizeof(key_type) + 32;
 				}
 			}
 		}
@@ -786,40 +823,48 @@ namespace rdb
 			// }
 		}
 	}
-	void MemoryCache::_reset_impl(write_store& map, hash_type key, View sort) noexcept
+	void MemoryCache::_reset_impl(write_store::iterator map, View sort) noexcept
 	{
 		RuntimeSchemaReflection::RTSI& schema = RuntimeSchemaReflection::info(_schema);
-		SharedBuffer buffer(schema.cstorage() + 1, schema.alignment());
+		SharedBuffer buffer(
+			schema.cstorage(View::view(sort)) + 1,
+			schema.alignment()
+		);
 		buffer.data()[0] = char(DataType::SchemaInstance);
-		schema.construct(buffer.data().data() + 1);
-		_pressure += buffer.size() + sizeof(key) + 16;
-		_emplace_slot(map, key, View::view(sort)) = slot(WriteType::Table, buffer);
+		schema.construct(buffer.data().data() + 1, sort);
+		_pressure += buffer.size() + sizeof(key_type) + 16;
+		_emplace_slot(map, View::view(sort)) = slot(WriteType::Table, buffer);
 	}
-	void MemoryCache::_remove_impl(write_store& map, hash_type key, View sort) noexcept
+	void MemoryCache::_remove_impl(write_store::iterator map, View sort) noexcept
 	{
-		_pressure += sizeof(key) + 24;
-		_emplace_slot(map, key, View::view(sort)) = slot(WriteType::Remov, nullptr);
+		_pressure += sizeof(key_type) + 24;
+		_emplace_slot(map, View::view(sort)) = slot(WriteType::Remov, nullptr);
 	}
 
-	void MemoryCache::write(WriteType type, hash_type key, View sort, std::span<const unsigned char> data) noexcept
+	void MemoryCache::write(WriteType type, key_type key, View partition, View sort, std::span<const unsigned char> data) noexcept
 	{
 		RDB_FMT("VCPU{} MC WRITE <{}> {}b", _id, uuid::encode(key, uuid::table_alnum), data.size())
+		const auto part = _create_partition_log_if(*_map, key, partition);
 		_logs.log(type, key, sort, View::view(data));
-		_write_impl(*_map, type, key, sort, data);
+		_write_impl(part, type, sort, data);
 		_flush_if();
 	}
-	void MemoryCache::reset(hash_type key, View sort) noexcept
+	void MemoryCache::reset(key_type key, View partition, View sort) noexcept
 	{
 		RDB_FMT("VCPU{} MC RESET <{}>", _id, uuid::encode(key, uuid::table_alnum))
+		const auto part = _create_partition_log_if(*_map, key, partition);
 		_logs.log(WriteType::Reset, key, sort);
-		_reset_impl(*_map, key, sort);
+		_reset_impl(part, sort);
 		_flush_if();
 	}
-	void MemoryCache::remove(hash_type key, View sort) noexcept
+	void MemoryCache::remove(key_type key, View sort) noexcept
 	{
 		RDB_FMT("VCPU{} MC REMOVE <{}>", _id, uuid::encode(key, uuid::table_alnum))
 		_logs.log(WriteType::Remov, key, sort);
-		_remove_impl(*_map, key, sort);
+		_remove_impl(
+			_find_partition(*_map, key),
+			sort
+		);
 		_flush_if();
 	}
 
@@ -1026,9 +1071,8 @@ namespace rdb
 				{
 					if (value == partition::const_iterator())
 					{
-						const auto& part = std::get<partition>(map.at(
-							offsets[j]
-						));
+						const auto& [ pkey, pdata ] = map.at(offsets[j]);
+						const auto& part = std::get<partition>(pdata);
 						begin = part.begin();
 						value = part.begin();
 						end = part.end();
@@ -1052,7 +1096,6 @@ namespace rdb
 								source.size()
 							});
 						}
-						source.push(value->first);
 						source.push(buffer.data());
 
 						if (size > _cfg->cache.block_size)
@@ -1071,7 +1114,7 @@ namespace rdb
 					{
 						const auto& buffer = std::get<slot>(map.at(
 							offsets[j]
-						)).second;
+						).second).second;
 						size += buffer.size();
 
 						if (j % _cfg->cache.sparse_index_ratio == 0)
@@ -1224,5 +1267,12 @@ namespace rdb
 
 		_pressure = 0;
 		_map = std::make_shared<write_store>();
+	}
+	void MemoryCache::clear() noexcept
+	{
+		if (_map->empty())
+			return;
+		_pressure = 0;
+		_map->clear();
 	}
 }

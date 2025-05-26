@@ -11,6 +11,7 @@ namespace rdb
 		RProc = 'r',
 		Remov = 'x',
 		Reset = 'n',
+		CreatePartition = 'P',
 		Reserved = '\0'
 	};
 	enum class ReadType : char

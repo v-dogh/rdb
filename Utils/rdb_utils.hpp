@@ -121,6 +121,7 @@ namespace rdb
 		key_type xxhash(std::initializer_list<std::span<const unsigned char>> data, key_type seed = 0xaf02cb96) noexcept;
 		key_type xxhash_combine(key_type a, key_type b, key_type seed = 0xaf02cb96) noexcept;
 		key_type xxhash_combine(std::initializer_list<key_type> li, key_type seed = 0xaf02cb96) noexcept;
+		key_type xxhash_combine(std::span<const key_type> li, key_type seed = 0xaf02cb96) noexcept;
 	}
 
 	template<std::size_t Inline = 32, std::size_t Align = 0>
@@ -310,6 +311,29 @@ namespace rdb
 		template<std::size_t, std::size_t>
 		friend class StackView;
 
+		template<typename... Argv>
+		static auto combine_views(Argv&&... args) noexcept
+		{
+			const auto size = (args.size() + ...);
+			if (size == 0)
+				return StackView(nullptr);
+			StackView result = copy(size);
+
+			std::size_t off = 0;
+			([&]() {
+				if (!args.empty())
+				{
+					std::memcpy(
+						result.mutate().data() + off,
+						args.data().data(),
+						args.size()
+					);
+					off += args.size();
+				}
+			}(), ...);
+
+			return result;
+		}
 		static auto aligned_view(std::span<const unsigned char> data) noexcept
 		{
 			StackView view;
@@ -353,6 +377,33 @@ namespace rdb
 				return copy(data.data());
 			}
 			return view;
+		}
+		static auto copy(std::span<std::span<const unsigned char>> data) noexcept
+		{
+			const auto size = std::accumulate(data.begin(), data.end(), std::size_t(0),
+				[](std::size_t ctr, const auto& v) { return ctr + v.size(); }
+			);
+			if (size == 0)
+				return StackView(nullptr);
+			StackView result = copy(
+				size
+			);
+
+			std::size_t off = 0;
+			for (decltype(auto) it : data)
+			{
+				if (!it.empty())
+				{
+					std::memcpy(
+						result.mutate() + off,
+						it.data(),
+						it.size()
+					);
+					off += it.size();
+				}
+			}
+
+			return result;
 		}
 		static auto copy(std::span<const StackView> data) noexcept
 		{
@@ -704,6 +755,24 @@ namespace rdb
 			return (std::chrono::duration_cast<
 				std::chrono::nanoseconds
 			>(end - beg)) / its;
+		}
+		std::chrono::nanoseconds measure_reset(auto&& func, auto&& reset, std::size_t iterations = 1)
+		{
+			const auto its = iterations;
+			std::chrono::nanoseconds delta{ 0 };
+			const auto beg = std::chrono::steady_clock::now();
+			while (iterations--)
+			{
+				func();
+				const auto dbeg = std::chrono::steady_clock::now();
+				reset();
+				const auto dend = std::chrono::steady_clock::now();
+				delta += dend - dbeg;
+			}
+			const auto end = std::chrono::steady_clock::now();
+			return ((std::chrono::duration_cast<
+				std::chrono::nanoseconds
+			>(end - beg)) - delta) / its;
 		}
 
 		template<cmp::stringifiable_member Type>

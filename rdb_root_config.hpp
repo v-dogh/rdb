@@ -40,7 +40,7 @@ namespace rdb
 		struct Mount
 		{
 			// Number of cores for the database to distribute load
-			std::size_t cores{ std::thread::hardware_concurrency() - 1 };
+			std::size_t cores{ std::thread::hardware_concurrency() };
 			// Whether to enable NUMA awareness
 			bool numa{ false };
 		} mnt;

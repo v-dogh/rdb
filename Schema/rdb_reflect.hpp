@@ -173,6 +173,7 @@ namespace rdb
 			std::size_t(*alignment)();
 			std::size_t(*storage)(const void*);
 			std::size_t(*sstorage)();
+			key_type(*hash)(const void*);
 			wproc_query_result(*wproc)(void*, proc_opcode, proc_param, wproc_query);
 			rproc_result(*rproc)(const void*, proc_opcode, proc_param);
 			bool(*fproc)(const void*, proc_opcode, proc_param);
@@ -194,8 +195,8 @@ namespace rdb
 	public:
 		struct RTSI
 		{
-			void(*construct)(void*);
-			std::size_t(*cstorage)();
+			void(*construct)(void*, View);
+			std::size_t(*cstorage)(View);
 			std::size_t(*alignment)();
 			std::size_t(*storage)(const void*);
 
@@ -204,7 +205,11 @@ namespace rdb
 
 			View(*cfield)(const void*, std::size_t);
 			View(*field)(void*, std::size_t);
+			View(*skfield)(const void*, std::size_t);
 			View(*transcode)(version_type, View);
+
+			key_type(*hash_partition)(View);
+			std::size_t(*partition_size)(View);
 
 			version_type(*topology)(std::size_t);
 			std::size_t(*fields)();
@@ -237,6 +242,7 @@ namespace rdb
 	struct EqualityKeyComparator
 	{
 		schema_type schema{};
+		// Special case, expects full schema for rhs
 		std::pair<bool, std::size_t> operator()(const View& lhs, const View& rhs) const noexcept;
 	};
 }

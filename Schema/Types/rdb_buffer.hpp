@@ -153,7 +153,7 @@ namespace rdb::type
 			{
 				std::uint64_t length;
 				std::uint64_t volume;
-			} _std;
+			} _std{ 0, 0 };
 			struct
 			{
 				std::conditional_t<(_sbo_max > 0),
@@ -385,8 +385,9 @@ namespace rdb::type
 		template<typename... Argv>
 		static auto minline(std::span<unsigned char> view, Argv&&... args) noexcept
 		{
+			const auto s = mstorage(args...);
 			new (view.data()) BufferBase{ std::forward<Argv>(args)... };
-			return mstorage(args...);
+			return s;
 		}
 
 		BufferBase()
@@ -625,12 +626,28 @@ namespace rdb::type
 			);
 			if constexpr (_is_string)
 			{
-				const auto result = std::lexicographical_compare_three_way(
-					begin(), end(), other->begin(), other->end()
-				);
-				if (opcode == fOp::Smaller) return result < 0;
-				else if (opcode == fOp::Larger) return result > 0;
-				else if (opcode == fOp::Equal) return result == 0;
+				auto i1 = begin();
+				auto i2 = other->begin();
+				auto e1 = end();
+				auto e2 = other->end();
+
+				auto result = std::strong_ordering::less;
+				for (; i1 != e1 && i2 != e2; ++i1, ++i2)
+				{
+					auto cmp = i1->value() <=> i2->value();
+					if (cmp != 0)
+					{
+						result = cmp;
+						break;
+					}
+				}
+				if (i1 == e1)
+					if (i2 == e2)
+						result = std::strong_ordering::equal;
+
+				if (opcode == fOp::Smaller) return result == std::strong_ordering::less;
+				else if (opcode == fOp::Larger) return result == std::strong_ordering::greater;
+				else if (opcode == fOp::Equal) return result == std::strong_ordering::equal;
 			}
 			else
 			{

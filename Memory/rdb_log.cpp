@@ -58,6 +58,23 @@ namespace rdb
 					);
 				}
 			}
+			else if (shard.memory()[off] == char(WriteType::CreatePartition))
+			{
+				const auto wtype = WriteType(shard.memory()[off]);
+				off += sizeof(WriteType);
+				const auto key = byte::sread<key_type>(shard.memory(), off);
+				const auto length = byte::sread<std::uint32_t>(shard.memory(), off);
+				callback(
+					wtype,
+					key,
+					nullptr,
+					View::view(shard.memory().subspan(
+						off,
+						length
+					))
+				);
+				off += length;
+			}
 			else
 			{
 				const auto wtype = WriteType(shard.memory()[off]);
@@ -130,8 +147,11 @@ namespace rdb
 	void Log::log(WriteType type, key_type key, View sort, View data) noexcept
 	{
 		const auto req =
-			(data != nullptr ? data.data().size() + sizeof(std::uint32_t) : 0)
-			+ sizeof(type) + sizeof(key) + sort.size();
+			type == WriteType::CreatePartition ?
+				(data.size() + sizeof(type) + sizeof(key_type) + sizeof(std::uint32_t)) :
+				((data != nullptr ? data.data().size() + sizeof(std::uint32_t) : 0)
+				+ sizeof(type) + sizeof(key) + sort.size());
+
 		if (_current.empty() ||
 			req + _shard_offset > _smap.size())
 		{
@@ -159,22 +179,34 @@ namespace rdb
 		// If we need a new shard but we still have bytes left, we append a WriteType::Reserved (since it is 0 we do not explicitly do that)
 
 		const auto skey = byte::byteswap_for_storage<key_type>(key);
-		if (data != nullptr)
+		if (type == WriteType::CreatePartition)
 		{
 			const auto len = byte::byteswap_for_storage<std::uint32_t>(data.size());
 			_smap.write(_shard_offset + 1, std::array{
 				View::view(byte::tspan(skey)),
-				sort,
 				View::view(byte::tspan(len)),
 				data
 			});
 		}
 		else
 		{
-			_smap.write(_shard_offset + 1, std::array{
-				View::view(byte::tspan(skey)),
-				sort
-			});
+			if (data != nullptr)
+			{
+				const auto len = byte::byteswap_for_storage<std::uint32_t>(data.size());
+				_smap.write(_shard_offset + 1, std::array{
+					View::view(byte::tspan(skey)),
+					sort,
+					View::view(byte::tspan(len)),
+					data
+				});
+			}
+			else
+			{
+				_smap.write(_shard_offset + 1, std::array{
+					View::view(byte::tspan(skey)),
+					sort
+				});
+			}
 		}
 
 		// Separate into two writes to make sure the logs don't get corrupted during power failure

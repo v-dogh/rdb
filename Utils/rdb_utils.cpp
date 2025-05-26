@@ -209,5 +209,12 @@ namespace rdb
 				state.update(&it, sizeof(it));
 			return state.digest();
 		}
+		key_type xxhash_combine(std::span<const key_type> li, key_type seed) noexcept
+		{
+			xxh::hash_state_t<64> state{ seed };
+			for (decltype(auto) it : li)
+				state.update(&it, sizeof(it));
+			return state.digest();
+		}
 	}
 }

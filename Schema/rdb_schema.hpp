@@ -1,13 +1,14 @@
 #ifndef RDB_SCHEMA_HPP
 #define RDB_SCHEMA_HPP
 
-#include <cstring>
-#include <string_view>
-#include <span>
 #include <rdb_reflect.hpp>
 #include <rdb_utils.hpp>
 #include <rdb_keytype.hpp>
 #include <rdb_locale.hpp>
+#include <cstring>
+#include <string_view>
+#include <span>
+#include <sstream>
 
 namespace rdb
 {
@@ -41,7 +42,7 @@ namespace rdb
 		// E.g. a string might return it's length + the header
 		{ v.storage() } -> std::same_as<std::size_t>;
 		// Returns a hash of the data
-		{ v.hash() } -> std::same_as<hash_type>;
+		{ v.hash() } -> std::same_as<key_type>;
 		// Returns a view to the entire object
 		{ v.view() } -> std::same_as<View>;
 		// Write and read procedures are used for performing any kind of operation on an object
@@ -65,95 +66,11 @@ namespace rdb
 		// { Type::ReadPair<Opcode>::param Type::ReadPair<Opcode>::result }
 	};
 
-	namespace impl
+	enum class FieldType
 	{
-		template<cmp::ConstString... Keys>
-		struct Keylist
-		{
-			template<std::size_t Idx, cmp::ConstString Key, cmp::ConstString... Rest>
-			struct IndexImpl
-			{
-				static constexpr auto key = IndexImpl<Idx - 1, Rest...>::key;
-			};
-			template<cmp::ConstString Key, cmp::ConstString... Rest>
-			struct IndexImpl<0, Key, Rest...>
-			{
-				static constexpr auto key = Key;
-			};
-
-			template<std::size_t Idx>
-			struct Index
-			{
-				static constexpr auto key = IndexImpl<Idx, Keys...>::key;
-			};
-
-			template<cmp::ConstString Search, cmp::ConstString Key, cmp::ConstString... Rest>
-			struct HasKeyImpl :
-				std::conditional_t<
-					Search == Key,
-					std::true_type,
-					std::conditional_t<
-						sizeof...(Rest) == 0,
-						std::false_type,
-						HasKeyImpl<Search, Rest...>
-					>
-				>
-			{ };
-
-			template<cmp::ConstString Key>
-			struct HasKey
-			{
-				static constexpr auto is = HasKeyImpl<Key, Keys...>::value;
-			};
-
-			template<cmp::ConstString Key>
-			static constexpr auto has = HasKey<Key>::is;
-			static constexpr auto count = sizeof...(Keys);
-		};
-	}
-
-	template<cmp::ConstString... Keys>
-	using Partition = impl::Keylist<Keys...>;
-	template<cmp::ConstString... Keys>
-	using Sort = impl::Keylist<Keys...>;
-
-	template<typename PKey, typename SKey = impl::Keylist<>, Order... Ordering>
-	struct Keyset
-	{
-	private:
-		template<std::size_t Idx, Order... Rest>
-		struct KeyOrderingImpl
-		{
-			static constexpr auto order = KeyOrderingImpl<Idx - 1, Rest...>::order;
-		};
-		template<Order O, Order... Rest>
-		struct KeyOrderingImpl<0, O, Rest...>
-		{
-			static constexpr auto order = O;
-		};
-		template<>
-		struct KeyOrderingImpl<0>
-		{
-			static constexpr auto order = Order::Ascending;
-		};
-
-		template<std::size_t Idx>
-		struct KeyOrdering
-		{
-			static constexpr auto order = KeyOrderingImpl<Idx, Ordering...>::order;
-		};
-	public:
-		template<std::size_t Idx>
-		static constexpr auto partition = PKey::template Index<Idx>::key;
-		static constexpr auto partition_count = PKey::count;
-		template<std::size_t Idx>
-		static constexpr auto sort = SKey::template Index<Idx>::key;
-		static constexpr auto sort_count = SKey::count;
-		template<std::size_t Idx>
-		static constexpr auto sort_order = KeyOrdering<Idx>::order;
-		template<cmp::ConstString Key>
-		static constexpr auto has =
-			PKey::template has<Key> || SKey::template has<Key>;
+		Data,
+		Partition,
+		Sort
 	};
 
 	template<typename Base>
@@ -223,6 +140,7 @@ namespace rdb
 				[]() { return alignof(Base); },
 				[](const void* ptr) { return static_cast<const Base*>(ptr)->storage(); },
 				[]() { return sizeof(Base); },
+				[](const void* ptr) { return static_cast<const Base*>(ptr)->hash(); },
 				[](void* ptr, proc_opcode o, proc_param p, wproc_query q) { return static_cast<Base*>(ptr)->wproc(o, proc_param::view(p), q); },
 				[](const void* ptr, proc_opcode o, proc_param p) { return static_cast<const Base*>(ptr)->rproc(o, proc_param::view(p)); },
 				[](const void* ptr, proc_opcode o, proc_param p) { return static_cast<const Base*>(ptr)->fproc(o, proc_param::view(p)); },
@@ -252,11 +170,13 @@ namespace rdb
 		}
 	};
 
-	template<cmp::ConstString Name, InterfaceType Inf>
+	template<cmp::ConstString Name, InterfaceType Inf, FieldType Type = FieldType::Data, Order Ordering = Order::Ascending>
 	struct Field
 	{
 		static constexpr auto name = *Name;
 		static constexpr auto cname = Name;
+		static constexpr auto type = Type;
+		static constexpr auto order = Ordering;
 		using interface = Inf;
 	};
 
@@ -298,6 +218,7 @@ namespace rdb
 			static_assert(sizeof...(Rest), "Invalid field");
 			using type = SearchFieldImpl<Name, Rest...>;
 			using interface = type::interface;
+			using field = type::field;
 			static constexpr auto offset = sizeof(typename Field::interface) + type::offset;
 			static constexpr auto idx = type::idx;
 		};
@@ -305,6 +226,7 @@ namespace rdb
 		struct SearchFieldImpl<Name, Field, Rest...>
 		{
 			using interface = Field::interface;
+			using field = Field;
 			static constexpr auto offset = 0;
 			static constexpr auto idx = sizeof...(Fields) - sizeof...(Rest) - 1;
 		};
@@ -312,11 +234,115 @@ namespace rdb
 		struct SearchField
 		{
 			using type = SearchFieldImpl<Name, Fields...>;
+			using interface = type::interface;
+			using field = type::field;
 			static constexpr auto offset = type::offset;
 			static constexpr auto idx = type::idx;
-			using interface = type::interface;
 		};
+	public:
+		template<cmp::ConstString Name>
+		using interface = SearchField<Name>::interface;
+		template<cmp::ConstString Name>
+		using field_type = SearchField<Name>::field;
 	private:
+		template<cmp::ConstString Key, cmp::ConstString... Rest>
+		struct PartitionCountImpl
+		{
+			static constexpr auto count =
+				PartitionCountImpl<Rest...>::count +
+				(field_type<Key>::type == FieldType::Partition);
+		};
+		template<cmp::ConstString Key>
+		struct PartitionCountImpl<Key>
+		{
+			static constexpr auto count =
+				(field_type<Key>::type == FieldType::Partition);
+		};
+
+		template<cmp::ConstString Key, cmp::ConstString... Rest>
+		struct SortCountImpl
+		{
+			static constexpr auto count =
+				SortCountImpl<Rest...>::count +
+				(field_type<Key>::type == FieldType::Sort);
+		};
+		template<cmp::ConstString Key>
+		struct SortCountImpl<Key>
+		{
+			static constexpr auto count =
+				(field_type<Key>::type == FieldType::Sort);
+		};
+
+		template<FieldType Type, std::size_t Idx, typename Field, typename... Rest>
+		struct SearchKeyImpl
+		{
+			static_assert(sizeof...(Rest), "Invalid key");
+			using field = typename SearchKeyImpl<
+				Type,
+				Idx - (Field::type == Type ? 1 : 0),
+				Rest...
+			>::field;
+		};
+		template<FieldType Type, std::size_t Idx, typename Field, typename... Rest>
+			requires (Idx == 0 && Field::type == Type)
+		struct SearchKeyImpl<Type, Idx, Field, Rest...>
+		{
+			using field = Field;
+		};
+		template<std::size_t Idx>
+		struct SearchPartitionKey
+		{
+			using field = SearchKeyImpl<FieldType::Partition, Idx, Fields...>::field;
+		};
+		template<std::size_t Idx>
+		struct SearchSortKey
+		{
+			using field = SearchKeyImpl<FieldType::Sort, Idx, Fields...>::field;
+		};
+	public:
+		static constexpr auto partition_count = PartitionCountImpl<Fields::cname...>::count;
+		static constexpr auto sort_count = SortCountImpl<Fields::cname...>::count;
+		template<std::size_t Idx> static constexpr auto partition = SearchPartitionKey<Idx>::field::cname;
+		template<std::size_t Idx> static constexpr auto sort = SearchSortKey<Idx>::field::cname;
+		template<std::size_t Idx> static constexpr auto sort_order = SearchSortKey<Idx>::field::order;
+		template<cmp::ConstString Key> static constexpr auto has =
+			(field_type<Key>::type == FieldType::Partition) ||
+			(field_type<Key>::type == FieldType::Sort);
+	private:
+		template<typename Func>
+		static constexpr void _for_each(Func&& callback, auto&&... args) noexcept
+		{
+			if constexpr (sizeof...(args))
+			{
+				([&]<typename Field>()
+				{
+					if constexpr (Field::type != FieldType::Partition)
+					{
+						std::forward<Func>(callback).template operator()<Field>(
+							std::forward<decltype(args)>(args)
+						);
+					}
+				}.template operator()<Fields>(), ...);
+			}
+			else
+			{
+				([&]<typename Field>()
+				{
+					if constexpr (Field::type != FieldType::Partition)
+						std::forward<Func>(callback).template operator()<Field>();
+				}.template operator()<Fields>(), ...);
+			}
+		}
+		template<typename Func>
+		static constexpr auto _for_each_table(Func&& callback) noexcept
+		{
+			return std::array{ [&]<typename Field>()
+			{
+				if constexpr (Field::type != FieldType::Partition)
+					std::forward<Func>(callback).template operator()<Field>();
+			}.template operator()<Fields>()... };
+		}
+
 		template<typename Interface>
 		const auto* _at(std::size_t off) const noexcept
 		{
@@ -349,11 +375,10 @@ namespace rdb
 			{
 				std::size_t off = 0;
 				std::size_t len = 0;
-				([&]<typename Field>()
-				{
-					if constexpr (Field::uname != Name.view())
+				_for_each([&]<typename Field>() {
+					if constexpr (Field::interface::uname != Name.view())
 					{
-						len = _at<Field>(off)->storage();
+						len = _at<typename Field::interface>(off)->storage();
 						return true;
 					}
 					else
@@ -361,8 +386,7 @@ namespace rdb
 						off += _at<Field>(off)->storage();
 						return false;
 					}
-				}.template operator()<typename Fields::interface>() || ...);
-
+				});
 				return TypedView<typename field::interface>::view(
 					std::span(
 						reinterpret_cast<const unsigned char*>(this) + off,
@@ -388,8 +412,7 @@ namespace rdb
 			{
 				std::size_t off = 0;
 				std::size_t len = 0;
-				([&]<typename Field>()
-				{
+				_for_each([&]<typename Field>() {
 					if constexpr (Field::uname != Name.view())
 					{
 						len = _at<Field>(off)->storage();
@@ -400,8 +423,7 @@ namespace rdb
 						off += _at<Field>(off)->storage();
 						return false;
 					}
-				}.template operator()<typename Fields::interface>() || ...);
-
+				});
 				return TypedView<typename field::interface>::view(
 					std::span(
 						reinterpret_cast<unsigned char*>(this) + off,
@@ -436,6 +458,37 @@ namespace rdb
 		}
 
 		template<std::size_t... Count>
+		View _runtime_sort_field_impl(std::size_t idx, std::index_sequence<Count...>) const noexcept
+		{
+			if constexpr (sort_count)
+			{
+				static auto table = std::array{
+					+[](const Topology* ptr) -> View {
+						auto field = ptr->_field_impl<sort<Count>>();
+						return View::view(std::span{
+							field.data().data(),
+							field.size()
+						});
+					}...
+				};
+				return table[idx](this);
+			}
+			else
+			{
+				std::terminate();
+			}
+		}
+		template<std::size_t... Count>
+		View _runtime_sort_field_impl(std::size_t idx, std::index_sequence<Count...> s) noexcept
+		{
+			View view = const_cast<const Topology*>(this)->_runtime_sort_field_impl(idx, s);
+			return View::view(std::span(
+				const_cast<unsigned char*>(view.data().data()),
+				view.size()
+			));
+		}
+
+		template<std::size_t... Count>
 		static RuntimeInterfaceReflection::RTII& _runtime_reflect_impl(std::size_t idx, std::index_sequence<Count...>) noexcept
 		{
 			static auto table = std::array{ Fields::interface::ucode... };
@@ -447,17 +500,32 @@ namespace rdb
 			(Fields::interface::require(), ...);
 		};
 	public:
-		template<cmp::ConstString Name>
-		using interface = SearchField<Name>::interface;
-
 		template<typename... Argv>
 		static constexpr auto make(Argv&&... args) noexcept
 		{
-			auto data = AlignedTypedView<Topology, align()>::copy(
-				(Fields::interface::mstorage(args) + ...)
-			);
+			std::size_t size = 0;
 			std::size_t off = 0;
-			((off += Fields::interface::minline(args, data.mutate().subspan(off))), ...);
+			_for_each([&]<typename Field>() {
+				size += Field::interface::mstorage();
+			});
+			auto data = AlignedTypedView<Topology, align()>::copy(size);
+			if constexpr (sizeof...(Argv))
+			{
+				_for_each([&]<typename Field, typename Arg>(Arg&& arg) {
+					off += Field::interface::minline(
+						data.mutate().subspan(off),
+						std::forward<Arg>(arg)
+					);
+				}, std::forward<Argv>(args)...);
+			}
+			else
+			{
+				_for_each([&]<typename Field>() {
+					off += Field::interface::minline(
+						data.mutate().subspan(off)
+					);
+				}, std::forward<Argv>(args)...);
+			}
 			return data;
 		}
 		static constexpr version_type topology(std::size_t cutoff = ~0ull) noexcept
@@ -477,25 +545,79 @@ namespace rdb
 
 			version_type hash{ fnv_offset };
 			std::size_t idx = fnv_prime;
-			([&]<typename Type>() {
-				hash = fnv(hash, Type::ucode ^ fnv(hash, idx++));
-				return --cutoff;
-			}.template operator()<typename Fields::interface>(), ...);
+			_for_each([&]<typename Field>() {
+				  hash = fnv(hash, Field::interface::ucode ^ fnv(hash, idx++));
+				  return --cutoff;
+			});
 
 			return hash;
 		}
 		static constexpr std::size_t align() noexcept
 		{
-			return std::max({ alignof(typename Fields::interface)... });
+			std::size_t m = 0;
+			_for_each([&]<typename Field>() {
+				m = std::max(alignof(typename Field::interface), m);
+			});
+			return m;
 		}
-		static constexpr auto dstorage() noexcept
+		static constexpr auto mstorage() noexcept
 		{
-			return std::size_t((Fields::interface::mstorage() + ...));
+			std::size_t size = 0;
+			_for_each([&]<typename Field>() {
+				size += Field::interface::mstorage();
+			});
+			return size;
 		}
 		static auto minline(std::span<unsigned char> data) noexcept
 		{
 			std::size_t off = 0;
-			((off += Fields::interface::minline(data.subspan(off))), ...);
+			_for_each([&]<typename Field>() {
+				off += Field::interface::minline(data.subspan(off));
+			});
+		}
+		static constexpr auto mstorage_init_keys(View view) noexcept
+		{
+			std::size_t size = 0;
+			std::size_t skey_off = 0;
+			_for_each([&]<typename Field>() {
+				if constexpr (Field::type == FieldType::Sort)
+				{
+					const auto size = TypedView<typename Field::interface>(
+						view.data()
+					)->storage();
+					skey_off += size;
+					size += size;
+				}
+				else
+				{
+					size += Field::interface::mstorage();
+				}
+			});
+			return size;
+		}
+		static auto minline_init_keys(std::span<unsigned char> data, View view) noexcept
+		{
+			std::size_t off = 0;
+			std::size_t skey_off = 0;
+			_for_each([&]<typename Field>() {
+				if constexpr (Field::type == FieldType::Sort)
+				{
+					const auto size = TypedView<typename Field::interface>(
+						view.data()
+					)->storage();
+					std::memcpy(
+						data.data() + off,
+						view.data().data() + skey_off,
+						size
+					);
+					skey_off += size;
+					size += size;
+				}
+				else
+				{
+					off += Field::interface::minline(data.subspan(off));
+				}
+			});
 		}
 
 		template<cmp::ConstString Name>
@@ -517,8 +639,32 @@ namespace rdb
 		constexpr std::size_t storage() const noexcept
 		{
 			std::size_t size = 0;
-			((size += _at<typename Fields::interface>(size)->storage()), ...);
+			_for_each([&]<typename Field>() {
+				size += _at<typename Field::interface>(size)->storage();
+			});
 			return size;
+		}
+
+		std::string print() const noexcept
+		{
+			std::stringstream out;
+
+			out << "[";
+			std::size_t off = 0;
+			_for_each([&]<typename Field>() {
+				const auto* ptr = _at<interface<Field::cname>>(off);
+				out << "\n"
+					<< "\t"
+					<< Field::name
+					<< "<"
+					<< Field::interface::uname
+					<< ">: "
+					<< ptr->print();
+				off += ptr->storage();
+			});
+			out << "\n]";
+
+			return out.str();
 		}
 
 		std::size_t fw_apply(std::size_t idx, View data, std::size_t buffer) noexcept
@@ -593,9 +739,15 @@ namespace rdb
 				idx, std::make_index_sequence<sizeof...(Fields)>()
 			);
 		}
+		View sort_field(std::size_t idx) const noexcept
+		{
+			return _runtime_sort_field_impl(
+				idx, std::make_index_sequence<sort_count>()
+			);
+		}
 	};
 
-	template<cmp::ConstString Name, typename Keys, typename Topology, typename... Parsers>
+	template<cmp::ConstString Name, typename Topology, typename... Parsers>
 	class Schema : public Topology
 	{
 	private:
@@ -607,7 +759,7 @@ namespace rdb
 					return
 						RuntimeInterfaceReflection::info(
 							Topology::template interface<
-								Keys::template partition<Idx>
+								Topology::template partition<Idx>
 							>::ucode
 						);
 				}...
@@ -617,14 +769,14 @@ namespace rdb
 		template<std::size_t... Idx>
 		static RuntimeInterfaceReflection::RTII& _reflect_skey_impl(std::size_t idx, std::index_sequence<Idx...>) noexcept
 		{
-			if constexpr (Keys::sort_count)
+			if constexpr (Topology::sort_count)
 			{
 				static std::array table{
 					+[]() -> RuntimeInterfaceReflection::RTII& {
 						return
 							RuntimeInterfaceReflection::info(
 								Topology::template interface<
-									Keys::template sort<Idx>
+									Topology::template sort<Idx>
 								>::ucode
 							);
 					}...
@@ -639,11 +791,11 @@ namespace rdb
 		template<std::size_t... Idx>
 		static Order _skey_order(std::size_t idx, std::index_sequence<Idx...>) noexcept
 		{
-			if constexpr (Keys::sort_count)
+			if constexpr (Topology::sort_count)
 			{
 				static std::array table{
 					+[]() -> Order {
-						return Keys::template sort_order<Idx>;
+						return Topology::template sort_order<Idx>;
 					}...
 				};
 				return table[idx]();
@@ -653,8 +805,41 @@ namespace rdb
 				std::terminate();
 			}
 		}
+		static key_type _hash_partition(View view) noexcept
+		{
+			std::array<key_type, Topology::partition_count> keys{};
+			std::size_t idx = 0;
+			std::size_t off = 0;
+			while (idx < Topology::partition_count &&
+				   off < view.size())
+			{
+				RuntimeInterfaceReflection::RTII& key
+					= reflect_pkey(idx);
+				const auto size = key.storage(view.data().data() + off);
+				keys[idx] = key.hash(view.data().data() + off);
+				off += size;
+				idx++;
+			}
+			return uuid::xxhash_combine(
+				std::span(keys.begin(), keys.end())
+			);
+		}
+		static std::size_t _partition_size(View view) noexcept
+		{
+			std::size_t idx = 0;
+			std::size_t off = 0;
+			while (idx < Topology::partition_count &&
+				   off < view.size())
+			{
+				RuntimeInterfaceReflection::RTII& key
+					= reflect_pkey(idx);
+				off += key.storage(view.data().data() + off);
+				idx++;
+			}
+			return off;
+		}
 	public:
-		using keyset = Keys;
+		using topology = Topology;
 		static constexpr schema_type ucode = uuid::hash<schema_type>(*Name);
 
 		static View transcode(version_type version, View data) noexcept
@@ -664,19 +849,19 @@ namespace rdb
 		static RuntimeInterfaceReflection::RTII& reflect_pkey(std::size_t idx) noexcept
 		{
 			return _reflect_pkey_impl(
-				idx, std::make_index_sequence<Keys::partition_count>()
+				idx, std::make_index_sequence<Topology::partition_count>()
 			);
 		}
 		static RuntimeInterfaceReflection::RTII& reflect_skey(std::size_t idx) noexcept
 		{
 			return _reflect_skey_impl(
-				idx, std::make_index_sequence<Keys::sort_count>()
+				idx, std::make_index_sequence<Topology::sort_count>()
 			);
 		}
 		static Order skey_order(std::size_t idx) noexcept
 		{
 			return _skey_order(
-				idx, std::make_index_sequence<Keys::sort_count>()
+				idx, std::make_index_sequence<Topology::sort_count>()
 			);
 		}
 
@@ -684,8 +869,8 @@ namespace rdb
 		{
 			Topology::require_fields();
 			RuntimeSchemaReflection::reg(ucode, RuntimeSchemaReflection::RTSI{
-				[](void* ptr) { Topology::minline(std::span(static_cast<unsigned char*>(ptr), std::dynamic_extent)); },
-				[]() { return Topology::dstorage(); },
+				[](void* ptr, View sort) { Topology::minline_init_keys(std::span(static_cast<unsigned char*>(ptr), std::dynamic_extent), sort); },
+				[](View sort) { return Topology::mstorage_init_keys(sort); },
 				[]() { return Topology::align(); },
 				[](const void* ptr) { return static_cast<const Topology*>(ptr)->storage(); },
 
@@ -694,11 +879,15 @@ namespace rdb
 
 				[](const void* ptr, std::size_t i) { return static_cast<const Topology*>(ptr)->field(i); },
 				[](void* ptr, std::size_t i) { return static_cast<Topology*>(ptr)->field(i); },
+				[](const void* ptr, std::size_t i) { return static_cast<const Topology*>(ptr)->sort_field(i); },
 				[](version_type v, View d) { return transcode(v, View::view(d)); },
 
+				[](View v) { return _hash_partition(View::view(v)); },
+				[](View v) { return _partition_size(View::view(v)); },
+
 				[](std::size_t c) { return Topology::topology(c); },
-				[]() { return Topology::fields; },
-				[]() { return Keys::sort_count; },
+				[]() -> std::size_t { return Topology::fields; },
+				[]() -> std::size_t { return Topology::sort_count; },
 				[](std::size_t c) { return skey_order(c); },
 
 				[](std::size_t idx) -> RuntimeInterfaceReflection::RTII& { return Topology::reflect(idx); },

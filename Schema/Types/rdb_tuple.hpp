@@ -212,7 +212,7 @@ namespace rdb::type
 		{
 			std::size_t off = 0;
 			return uuid::xxhash_combine({
-				[&]() -> hash_type {
+				[&]() -> key_type {
 					const auto h = _at<Ts>(off)->hash();
 					off += _at<Ts>(off)->storage();
 					return h;

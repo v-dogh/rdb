@@ -92,11 +92,9 @@ namespace rdb
 	std::pair<bool, std::size_t> EqualityKeyComparator::operator()(const View& lhs, const View& rhs) const noexcept
 	{
 		const auto* ldata = lhs.data().data();
-		const auto* rdata = rhs.data().data();
 		RuntimeSchemaReflection::RTSI& info
 			= RuntimeSchemaReflection::info(schema);
 		std::size_t off1 = 0;
-		std::size_t off2 = 0;
 		bool match = true;
 		for (std::size_t i = 0; i < info.skeys(); i++)
 		{
@@ -104,11 +102,10 @@ namespace rdb
 				info.reflect_skey(i);
 			match = match && key.fproc(
 				ldata + off1, proc_opcode(SortFilterOp::Equal),
-				View::view(std::span(rdata + off2, std::dynamic_extent))
+				info.skfield(rhs.data().data(), i)
 			);
 			off1 += key.storage(ldata + off1);
-			off2 += key.storage(rdata + off2);
 		}
-		return { match, off2 };
+		return { match, info.storage(rhs.data().data()) };
 	}
 }
