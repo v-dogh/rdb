@@ -29,7 +29,7 @@ namespace rdb::type
 				(Size + remcnt_) / bitlen_
 			> _data{};
 		private:
-			constexpr std::pair<unsigned int, unsigned int> _offs(std::size_t idx) noexcept
+			constexpr std::pair<unsigned int, unsigned int> _offs(std::size_t idx) const noexcept
 			{
 				return {
 					static_cast<unsigned int>(idx >> divcnt_),
@@ -37,7 +37,7 @@ namespace rdb::type
 				};
 			}
 
-			constexpr bool _get(std::size_t idx) noexcept
+			constexpr bool _get(std::size_t idx) const noexcept
 			{
 				const auto [quot, rem] = _offs(idx);
 				const storage_type mask = 1u << rem;
@@ -101,7 +101,7 @@ namespace rdb::type
 			{
 				_set(idx, value);
 			}
-			constexpr bool test(std::size_t idx) noexcept
+			constexpr bool test(std::size_t idx) const noexcept
 			{
 				return _get(idx);
 			}
@@ -165,7 +165,7 @@ namespace rdb::type
 
 	template<std::size_t Count>
 	class Bitset :
-		public Interface<Bitset<Count>, "bs">,
+		public Interface<Bitset<Count>, cmp::concat_const_string<"bs", cmp::int_to_const_string<Count>()>()>,
 		public InterfaceMake<Bitset<Count>>,
 		public InterfaceHelper<Bitset<Count>>
 	{

@@ -11,6 +11,10 @@ namespace rdb::type
 		public ScalarBase<Timestamp, std::chrono::system_clock::time_point::rep>,
 		public Interface<Timestamp, "tp64">
 	{
+		static auto minline(std::span<unsigned char> view, const std::chrono::system_clock::time_point::rep& value) noexcept
+		{
+			return ScalarBase::minline(view, value);
+		}
 		static auto minline(std::span<unsigned char> view) noexcept
 		{
 			ScalarBase::minline(view,
@@ -23,11 +27,19 @@ namespace rdb::type
 		public Interface<TimeUUID, "tuuid">
 	{
 	public:
+		static auto minline(std::span<unsigned char> view, const uuid::uint128_t& value) noexcept
+		{
+			return ScalarBase::minline(view, value);
+		}
 		static auto minline(std::span<unsigned char> view) noexcept
 		{
 			return ScalarBase::minline(view,
 				uuid::ugen(uuid::stable_machine())
 			);
+		}
+		static auto id() noexcept
+		{
+			return uuid::ugen(uuid::stable_machine());
 		}
 	};
 	class RandUUID :
@@ -35,11 +47,19 @@ namespace rdb::type
 		public Interface<RandUUID, "ruuid">
 	{
 	public:
+		static auto minline(std::span<unsigned char> view, const uuid::uint128_t& value) noexcept
+		{
+			return ScalarBase::minline(view, value);
+		}
 		static auto minline(std::span<unsigned char> view) noexcept
 		{
 			return ScalarBase::minline(view,
 				uuid::ugen()
 			);
+		}
+		static auto id() noexcept
+		{
+			return uuid::ugen();
 		}
 	};
 

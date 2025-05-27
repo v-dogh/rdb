@@ -208,8 +208,8 @@ namespace rdb
 			View(*skfield)(const void*, std::size_t);
 			View(*transcode)(version_type, View);
 
-			key_type(*hash_partition)(View);
-			std::size_t(*partition_size)(View);
+			key_type(*hash_partition)(const void*);
+			std::size_t(*partition_size)(const void*);
 
 			version_type(*topology)(std::size_t);
 			std::size_t(*fields)();

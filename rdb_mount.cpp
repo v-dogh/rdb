@@ -176,11 +176,11 @@ namespace rdb
 			// Get partition key
 			{
 				const auto size = info->partition_size(
-					View::view(packet.subspan(off))
+					packet.subspan(off).data()
 				);
 				pkey = View::view(packet.subspan(off, size));
 				off += size;
-				key = info->hash_partition(pkey);
+				key = info->hash_partition(pkey.data().data());
 			}
 			// Get sort keys
 			if (info->skeys())
@@ -249,7 +249,6 @@ namespace rdb
 		}
 		else if (op == cmd::qOp::Write)
 		{
-			off += sizeof(std::uint8_t);
 			const auto len = byte::sread<std::uint32_t>(packet.data(), off);
 			state.acquire();
 			core.launch(Thread::task(schema, [=, &state, this](MemoryCache* cache) {
@@ -257,13 +256,13 @@ namespace rdb
 					WriteType::Field,
 					key, partition, sort,
 					packet.subspan(
-						off - sizeof(std::uint8_t),
+						off,
 						len + sizeof(std::uint8_t)
 					)
 				);
 				state.release();
 			}));
-			off += len;
+			off += len + sizeof(std::uint8_t);
 		}
 		else if (op == cmd::qOp::Read)
 		{
@@ -294,19 +293,22 @@ namespace rdb
 		}
 		else if (op == cmd::qOp::WProc)
 		{
-			off += sizeof(std::uint8_t) + sizeof(proc_opcode);
 			const auto len = byte::sread<std::uint32_t>(packet.data(), off);
-			off += len;
-
 			state.acquire();
 			core.launch(Thread::task(schema, [=, &state, this](MemoryCache* cache) {
 				cache->write(
 					WriteType::WProc,
 					key, partition, sort,
-					packet.subspan(sizeof(cmd::qOp), sizeof(std::uint8_t) + sizeof(proc_opcode) + len)
+					packet.subspan(
+						off,
+						len +
+							sizeof(proc_opcode) +
+							sizeof(std::uint8_t)
+					)
 				);
 				state.release();
 			}));
+			off += len + sizeof(proc_opcode) + sizeof(std::uint8_t);
 		}
 		else if (op == cmd::qOp::RProc)
 		{

@@ -3,6 +3,7 @@
 
 #include <bitset>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <numeric>
 #include <string_view>
@@ -30,12 +31,12 @@ namespace rdb
 			constexpr ConstString() = default;
 			constexpr ConstString(const char (&str)[Size])
 			{
-				std::copy(str, str + Size, data.begin());
+				std::copy(str, str + Size - 1, data.begin());
 			}
 
 			constexpr auto view() const
 			{
-				return std::string_view(data.data());
+				return std::string_view(data.begin(), data.end());
 			}
 			constexpr auto operator*() const noexcept
 			{
@@ -43,20 +44,50 @@ namespace rdb
 			}
 		};
 
+		consteval int int_abs(int value) noexcept
+		{
+			return value < 0 ? -value : value;
+		}
+		consteval int int_count_digits(int value) noexcept
+		{
+			return (int_abs(value) < 10 ?
+				1 : 1 + int_count_digits(int_abs(value) / 10)) + (value < 0);
+		}
+		template<int Value>
+		consteval auto int_to_const_string() noexcept
+		{
+			ConstString<int_count_digits(Value)> str{};
+			std::size_t idx = str.data.size();
+
+			auto val = int_abs(Value);
+			do
+			{
+				str.data[--idx] = '0' + (val % 10);
+				val /= 10;
+			} while (val);
+
+			if (Value < 0)
+			{
+				str.data[--idx] = '-';
+			}
+
+			return str;
+		}
+
 		template<ConstString... Str>
 		constexpr auto concat_const_string() noexcept
 		{
-			ConstString<((Str.data.size() - 1) + ...) + 1> result;
+			ConstString<(Str.data.size() + ...)> result;
 
 			std::size_t off = 0;
 			([&]<ConstString Cur>()
 			{
 				std::copy(
 					Cur.data.begin(),
-					Cur.data.end() - 1,
+					Cur.data.end(),
 					result.data.begin() + off
 				);
-				off += Cur.data.size() - 1;
+				off += Cur.data.size();
 			}.template operator()<Str>(), ...);
 
 			return result;

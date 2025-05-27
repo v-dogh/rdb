@@ -112,10 +112,7 @@ namespace rdb
 		void _handle_close_soft(std::size_t flush) const noexcept;
 		void _handle_close(std::size_t flush) const noexcept;
 
-		partition _make_partition() const noexcept
-		{
-			return partition(SortKeyComparator{ _schema });
-		}
+		partition _make_partition() const noexcept;
 		SharedBuffer _make_shared_buffer(WriteType type, std::span<const unsigned char> data, std::size_t alignment = 0) noexcept;
 		void _merge_field_buffers(WriteType type, SharedBuffer buffer, std::span<const unsigned char> data) noexcept;
 

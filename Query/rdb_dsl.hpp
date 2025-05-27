@@ -236,7 +236,7 @@ namespace rdb
 			template<typename Schema>
 			constexpr auto size() const noexcept
 			{
-				static_assert(!Schema::topology::template has<Field>, "Cannot write to a key field");
+				static_assert(!Schema::data::template has<Field>, "Cannot write to a key field");
 				return
 					sizeof(qOp) +
 					sizeof(std::uint8_t) +
@@ -250,14 +250,14 @@ namespace rdb
 			constexpr auto fill(std::span<unsigned char> buffer) noexcept
 			{
 				buffer[0] = char(qOp::Write);
-				buffer[1] = static_cast<std::uint8_t>(Schema::template index_of<Field>());
-				std::size_t off = sizeof(qOp) + sizeof(std::uint8_t);
+				std::size_t off = sizeof(qOp);
 				off += byte::swrite<std::uint32_t>(buffer, off,
 					std::apply([](auto&&... args) {
 						return Schema::
 							template interface<Field>::mstorage(args...);
 					}, data)
 				);
+				buffer[off++] = static_cast<std::uint8_t>(Schema::template index_of<Field>());
 				off += byte::swrite(buffer, off,
 					std::apply([](auto&&... args) {
 						return Schema::template interface<Field>::make(
@@ -278,7 +278,7 @@ namespace rdb
 			template<typename Schema>
 			constexpr auto size() const noexcept
 			{
-				static_assert(!Schema::topology::template has<Field>, "Cannot write to a key field");
+				static_assert(!Schema::data::template has<Field>, "Cannot write to a key field");
 				return
 					sizeof(qOp) +
 					sizeof(std::uint8_t) +
@@ -306,7 +306,7 @@ namespace rdb
 			template<typename Schema>
 			constexpr auto size() const noexcept
 			{
-				static_assert(!Schema::topology::template has<Field>, "Cannot write to a key field");
+				static_assert(!Schema::data::template has<Field>, "Cannot write to a key field");
 				return
 					sizeof(qOp) +
 					sizeof(std::uint8_t) +
@@ -318,12 +318,12 @@ namespace rdb
 			constexpr auto fill(std::span<unsigned char> buffer) noexcept
 			{
 				buffer[0] = char(qOp::WProc);
-				buffer[1] = static_cast<std::uint8_t>(Scheme::template index_of<Field>());
-				buffer[2] = static_cast<unsigned char>(Op);
-				std::size_t off = sizeof(qOp) + sizeof(std::uint8_t) + sizeof(proc_opcode);
+				std::size_t off = sizeof(qOp);
 				off += byte::swrite<std::uint32_t>(buffer, off,
 					Scheme::template interface<Field>::mstorage(data)
 				);
+				buffer[off++] = static_cast<std::uint8_t>(Scheme::template index_of<Field>());
+				buffer[off++] = static_cast<unsigned char>(Op);
 				using type = Scheme::template interface<Field>;
 				off += byte::swrite(buffer, off, type::template WritePair<typename type::wOp(Op)>::param::make(
 					std::move(data), buffer.subspan(off)
@@ -391,13 +391,11 @@ namespace rdb
 				[&]<std::size_t... Idv>(std::index_sequence<Idv...>)
 				{
 					return std::tuple_element_t<1, cmd::compound_key>::combine_views(
-						Schema::template interface<
-							Schema::topology::template partition<Idv>
-						>::make(
+						Schema::partition::make(
 							std::get<Idv>(args)
 						)...
 					);
-				}(std::make_index_sequence<Schema::topology::partition_count>()),
+				}(std::make_index_sequence<Schema::partition::fields>()),
 				[&args]
 					<std::size_t... Idv>(std::index_sequence<Idv...>)
 				{
@@ -410,25 +408,25 @@ namespace rdb
 						cmd::compound_key::second_type view =
 							cmd::compound_key::second_type::copy(
 								(Schema::template interface<
-									Schema::topology::template sort<Idv>
+									Schema::data::template sort<Idv>
 								>::mstorage(
-									std::get<Schema::topology::partition_count + Idv>(args)
+									std::get<Schema::partition::fields + Idv>(args)
 								) + ...)
 							);
 						std::size_t off = 0;
-						([&]<std::size_t Idx>() mutable {
+						([&]() mutable {
 							auto value = (Schema::template interface<
-								Schema::topology::template sort<Idv>
+								Schema::data::template sort<Idv>
 							>::make(
-								std::get<Schema::topology::partition_count + Idx>(args))
+								std::get<Schema::partition::fields + Idv>(args))
 							);
 							off += byte::swrite(view.mutate(), off,
 								value
 							);
-						}.template operator()<Idv>(), ...);
+						}(), ...);
 						return view;
 					}
-				}(std::make_index_sequence<Schema::topology::sort_count>())
+				}(std::make_index_sequence<Schema::data::sort_count>())
 			};
 		}
 		template<typename Schema, typename... Ops>

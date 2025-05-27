@@ -215,15 +215,30 @@ namespace rdb
 		}
 	}
 
+	MemoryCache::partition MemoryCache::_make_partition() const noexcept
+	{
+		return partition(SortKeyComparator{ _schema });
+	}
+
 	MemoryCache::slot& MemoryCache::_emplace_sorted_slot(write_store::iterator part, View sort) noexcept
 	{
-		return part->second.second.emplace<partition>(
-			_make_partition()
-		).emplace(View::copy(std::move(sort)), slot()).first->second;
+		if (std::holds_alternative<std::nullopt_t>(part->second.second))
+		{
+			return part->second.second.emplace<partition>(
+				_make_partition()
+			).emplace(View::copy(std::move(sort)), slot()).first->second;
+		}
+		return std::get<partition>(part->second.second).emplace(
+			View::copy(std::move(sort)), slot()
+		).first->second;
 	}
 	MemoryCache::slot& MemoryCache::_emplace_unsorted_slot(write_store::iterator partition) noexcept
 	{
-		return partition->second.second.emplace<slot>();
+		if (std::holds_alternative<std::nullopt_t>(partition->second.second))
+		{
+			return partition->second.second.emplace<slot>();
+		}
+		return std::get<slot>(partition->second.second);
 	}
 	MemoryCache::slot& MemoryCache::_emplace_slot(write_store::iterator partition, View sort) noexcept
 	{
@@ -436,12 +451,18 @@ namespace rdb
 
 							std::size_t partition_footer_off = off + partition_size;
 
-							const auto prefix = byte::sread<std::uint32_t>(data.memory(), partition_footer_off);
+							const auto dynamic_prefix = byte::sread<std::uint32_t>(data.memory(), partition_footer_off);
+							const auto prefix = dynamic_prefix ? dynamic_prefix : sort.size();
 							const auto sparse_block_indices = byte::sread<std::uint32_t>(data.memory(), partition_footer_off);
 
 							const auto sparse_block_offset = sparse_block_indices ? byte::search_partition_binary<std::uint32_t>(
 								sort.data(), data.memory().subspan(partition_footer_off), sparse_block_indices, comparator, true
 							) : std::optional<std::uint32_t>(off);
+							// const auto is_first_block =
+							// 	!sparse_block_indices ||
+							// 	sparse_block_offset == byte::sread<std::uint32_t>(
+							// 		data.memory().subspan(partition_footer_off).data() + prefix
+							// 	);
 
 							// Linar search across blocks
 							if (sparse_block_offset.has_value())
@@ -502,9 +523,8 @@ namespace rdb
 											{
 												const auto [ eq, size ] = eq_comparator(
 													View::view(sort),
-													View::view(block.subspan(off))
+													View::view(block.subspan(off + 1))
 												);
-												off += size;
 												if (eq)
 												{
 													RDB_TRACE("VCPU{} MC READ FOUND VALUE", _id)
@@ -622,6 +642,9 @@ namespace rdb
 										off += _read_entry_size_impl(
 											View::view(block.subspan(off))
 										);
+										off += info.partition_size(
+											block.data() + off
+										);
 									}
 								} while (off < block.size());
 							}
@@ -735,18 +758,18 @@ namespace rdb
 			{
 				RuntimeSchemaReflection::RTSI& schema = RuntimeSchemaReflection::info(_schema);
 				if (const auto size = schema.fwapply(
-						storage.data().data(),
+						storage.data().data() + 1,
 						data[0], View::view(data.subspan(1)),
 						storage.size()
 					); size > storage.size())
 				{
 					storage.resize(size);
+					schema.fwapply(
+						storage.data().data() + 1,
+						data[0], View::view(data.subspan(1)),
+						~0ull
+					);
 				}
-				schema.fwapply(
-					storage.data().data(),
-					data[0], View::view(data.subspan(1)),
-					~0ull
-				);
 			}
 			else
 			{
@@ -780,12 +803,12 @@ namespace rdb
 			// 		); size > f->second.second.data().size())
 			// 	{
 			// 		f->second.second.resize(size);
+			// 		schema.wpapply(
+			// 			f->second.second.data().data(),
+			// 			data[0], data[1], View::view(data.subspan(2)),
+			// 			~0ull
+			// 		);
 			// 	}
-			// 	schema.wpapply(
-			// 		f->second.second.data().data(),
-			// 		data[0], data[1], View::view(data.subspan(2)),
-			// 		~0ull
-			// 	);
 			// }
 			// else if (f->second.first == WriteType::Field)
 			// {
@@ -1076,6 +1099,7 @@ namespace rdb
 						begin = part.begin();
 						value = part.begin();
 						end = part.end();
+						source.push(pkey);
 						// Partition size (reserve)
 						data.vmap_increment(sizeof(std::uint64_t));
 					}
@@ -1112,11 +1136,11 @@ namespace rdb
 				{
 					for (; j < offsets.size(); j++)
 					{
-						const auto& buffer = std::get<slot>(map.at(
-							offsets[j]
-						).second).second;
+						const auto& [ pkey, pdata ] = map.at(offsets[j]);
+						const auto& buffer = std::get<slot>(pdata).second;
 						size += buffer.size();
 
+						source.push(pkey);
 						if (j % _cfg->cache.sparse_index_ratio == 0)
 						{
 							indices.push_back({
