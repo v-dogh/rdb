@@ -113,6 +113,75 @@ namespace rdb
 		return _descriptors;
 	}
 
+	std::pair<View, bool> MemoryCache::_apply_wproc(std::variant<View, SharedBuffer> data, std::size_t field, proc_opcode opcode, proc_param params) noexcept
+	{
+		// RuntimeSchemaReflection::RTSI& info = RuntimeSchemaReflection::info(_schema);
+		// RuntimeInterfaceReflection::RTII& finfo = info.reflect(field);
+
+		// View result = nullptr;
+		// const auto storage = std::visit([]<typename Type>(Type& value) -> std::span<unsigned char> {
+		// 	if constexpr (std::is_same_v<Type, View>)
+		// 	{
+		// 		return value.mutate();
+		// 	}
+		// 	else
+		// 	{
+		// 		return value.data();
+		// 	}
+		// }, data);
+
+		// auto resize = [&](std::size_t size) {
+		// 	std::visit([&]<typename Type>(Type& value) -> void {
+		// 		if constexpr (std::is_same_v<Type, View>)
+		// 		{
+
+		// 		}
+		// 		else
+		// 		{
+		// 			value.resize(size);
+		// 		}
+		// 	}, data);
+		// };
+
+		// if (storage[0] == char(DataType::FieldSequence))
+		// {
+		// 	const auto type = finfo.wproc(
+		// 		storage.data(),
+		// 		opcode,
+		// 		params,
+		// 		wproc_query::Type
+		// 	);
+		// 	if (type == wproc_type::Dynamic)
+		// 	{
+		// 		const auto req = info.reflect(storage[0]).wproc(
+		// 			storage.subspan(1).data(),
+		// 			storage[1],
+		// 			View::view(storage.subspan(2)),
+		// 			wproc_query::Storage
+		// 		);
+		// 		if (req > storage.size())
+		// 			resize(req);
+		// 	}
+		// 	schema.reflect(data[0]).wproc(
+		// 		storage.data().subspan(1).data(),
+		// 		data[1],
+		// 		View::view(data.subspan(2)),
+		// 		wproc_query::Commit
+		// 	);
+		// }
+		// else if (storage[0] == char(DataType::SchemaInstance))
+		// {
+
+		// }
+		// else
+		// {
+		// 	return nullptr;
+		// }
+
+		// return result;
+		return { nullptr, false };
+	}
+
 	MemoryCache::FlushHandle& MemoryCache::_handle_open(std::size_t flush) const noexcept
 	{
 		constexpr auto map_cost = 2;
@@ -296,7 +365,7 @@ namespace rdb
 		else
 			return sizeof(DataType);
 	}
-	std::size_t MemoryCache::_read_entry_impl(View view, field_bitmap& fields, const read_callback& callback) noexcept
+	std::size_t MemoryCache::_read_entry_impl(View view, field_bitmap& fields, const read_callback* callback) noexcept
 	{
 		RuntimeSchemaReflection::RTSI& info =
 			RuntimeSchemaReflection::info(_schema);
@@ -312,11 +381,15 @@ namespace rdb
 					info.reflect(field);
 				off += finf.storage(view.data().data() + off);
 
-				if (fields.test(field))
+				if (callback && fields.test(field))
 				{
 					fields.reset(field);
 					cnt++;
-					callback(field, View::view(view.data().subspan(beg, off - beg)));
+					(*callback)(field, View::view(view.data().subspan(beg, off - beg)));
+				}
+				else
+				{
+					return 1;
 				}
 			} while (off < view.size());
 		}
@@ -331,18 +404,22 @@ namespace rdb
 					info.reflect(idx);
 				off += finf.storage(view.data().data() + off);
 
-				if (fields.test(idx))
+				if (callback && fields.test(idx))
 				{
 					fields.reset(idx);
 					cnt++;
-					callback(idx, View::view(view.data().subspan(beg, off - beg)));
+					(*callback)(idx, View::view(view.data().subspan(beg, off - beg)));
+				}
+				else
+				{
+					return 1;
 				}
 				idx++;
 			}
 		}
 		return cnt;
 	}
-	std::size_t MemoryCache::_read_cache_impl(const write_store& map, key_type key, View sort, field_bitmap& fields, const read_callback& callback) noexcept
+	std::size_t MemoryCache::_read_cache_impl(const write_store& map, key_type key, View sort, field_bitmap& fields, const read_callback* callback) noexcept
 	{
 		auto f = _find_slot(map, key, sort);
 		if (f == nullptr)
@@ -350,7 +427,7 @@ namespace rdb
 		return _read_entry_impl(View::view(f->second.data()), fields, callback);
 	}
 
-	void MemoryCache::read(key_type key, View sort, field_bitmap fields, const read_callback& callback) noexcept
+	bool MemoryCache::_read_impl(key_type key, View sort, field_bitmap fields, const read_callback* callback) noexcept
 	{
 		RDB_FMT("VCPU{} MC READ <{}>", _id, uuid::encode(key, uuid::table_alnum))
 
@@ -362,16 +439,16 @@ namespace rdb
 
 		RuntimeSchemaReflection::RTSI& info =
 			RuntimeSchemaReflection::info(_schema);
-		const auto required = fields.count();
+		const auto required = callback ? fields.count() : 1;
 
 		// Search cache
 		std::size_t found = 0;
-		{			
+		{
 			if ((found += _read_cache_impl(
 					*_map, key, View::view(sort), fields, callback
 				)) == required)
 			{
-				return;
+				return true;
 			}
 			else if (_flush_running)
 			{
@@ -383,7 +460,7 @@ namespace rdb
 								*lock, key, View::view(sort), fields, callback
 							)) == required)
 						{
-							return;
+							return true;
 						}
 					}
 				}
@@ -530,13 +607,13 @@ namespace rdb
 													RDB_TRACE("VCPU{} MC READ FOUND VALUE", _id)
 
 													if (block[off] == char(DataType::Tombstone))
-														return;
+														return true;
 
 													if ((found += _read_entry_impl(
 															View::view(block.subspan(off)), fields, callback
 														)) == required)
 													{
-														return;
+														return true;
 													}
 													else
 													{
@@ -623,13 +700,13 @@ namespace rdb
 										RDB_TRACE("VCPU{} MC READ FOUND VALUE", _id)
 
 										if (block[off] == char(DataType::Tombstone))
-											return;
+											return true;
 
 										if ((found += _read_entry_impl(
 												View::view(block.subspan(off)), fields, callback
 											)) == required)
 										{
-											return;
+											return true;
 										}
 										else
 										{
@@ -657,6 +734,17 @@ namespace rdb
 				}
 			}
 		}
+
+		return false;
+	}
+
+	void MemoryCache::read(key_type key, View sort, field_bitmap fields, const read_callback& callback) noexcept
+	{
+		_read_impl(key, sort, fields, &callback);
+	}
+	bool MemoryCache::exists(key_type key, View sort) noexcept
+	{
+		return _read_impl(key, sort, field_bitmap(), nullptr);
 	}
 
 	SharedBuffer MemoryCache::_make_shared_buffer(WriteType type, std::span<const unsigned char> data, std::size_t alignment) noexcept
@@ -789,61 +877,82 @@ namespace rdb
 		}
 		else if (type == WriteType::WProc)
 		{
-			// if (f->second.first == WriteType::Remov)
-			// {
-			// 	return;
-			// }
-			// else if (f->second.first == WriteType::Table)
-			// {
-			// 	RuntimeSchemaReflection::RTSI& schema = RuntimeSchemaReflection::info(_schema);
-			// 	if (const auto size = schema.wpapply(
-			// 			f->second.second.data().data(),
-			// 			data[0], data[1], View::view(data.subspan(2)),
-			// 			f->second.second.size()
-			// 		); size > f->second.second.data().size())
-			// 	{
-			// 		f->second.second.resize(size);
-			// 		schema.wpapply(
-			// 			f->second.second.data().data(),
-			// 			data[0], data[1], View::view(data.subspan(2)),
-			// 			~0ull
-			// 		);
-			// 	}
-			// }
-			// else if (f->second.first == WriteType::Field)
-			// {
-			// 	if (data[0] == f->second.second.data()[0])
-			// 	{
-			// 		RuntimeSchemaReflection::RTSI& schema = RuntimeSchemaReflection::info(_schema);
-			// 		const auto type = schema.reflect(data[0]).wproc(
-			// 			f->second.second.data().subspan(1).data(),
-			// 			data[1],
-			// 			View::view(data.subspan(2)),
-			// 			wproc_query::Type
-			// 		);
-			// 		if (type == wproc_type::Dynamic)
-			// 		{
-			// 			const auto req = schema.reflect(data[0]).wproc(
-			// 				f->second.second.data().subspan(1).data(),
-			// 				data[1],
-			// 				View::view(data.subspan(2)),
-			// 				wproc_query::Storage
-			// 			);
-			// 			if (req > f->second.second.size())
-			// 				f->second.second.resize(req);
-			// 		}
-			// 		schema.reflect(data[0]).wproc(
-			// 			f->second.second.data().subspan(1).data(),
-			// 			data[1],
-			// 			View::view(data.subspan(2)),
-			// 			wproc_query::Commit
-			// 		);
-			// 	}
-			// 	else
-			// 	{
+			RuntimeSchemaReflection::RTSI& info =
+				RuntimeSchemaReflection::info(_schema);
+			RuntimeInterfaceReflection::RTII& finfo =
+				info.reflect(data[0]);
 
-			// 	}
-			// }
+			if (finfo.fragmented())
+			{
+
+			}
+			else
+			{
+				if (wtype == WriteType::Remov)
+				{
+					return;
+				}
+				else if (wtype == WriteType::Table)
+				{
+					if (const auto size = info.wpapply(
+							storage.data().data() + 1,
+							data[0], data[1], View::view(data.subspan(2)),
+							storage.size()
+						); size > storage.data().size())
+					{
+						storage.resize(size);
+						info.wpapply(
+							storage.data().data() + 1,
+							data[0], data[1], View::view(data.subspan(2)),
+							~0ull
+						);
+					}
+				}
+				else if (wtype == WriteType::Field)
+				{
+					if (data[0] == storage.data()[0])
+					{
+						// RuntimeSchemaReflection::RTSI& schema = RuntimeSchemaReflection::info(_schema);
+						// const auto type = schema.reflect(data[0]).wproc(
+						// 	storage.data().subspan(1).data(),
+						// 	data[1],
+						// 	View::view(data.subspan(2)),
+						// 	wproc_query::Type
+						// );
+						// if (type == wproc_type::Dynamic)
+						// {
+						// 	const auto req = schema.reflect(data[0]).wproc(
+						// 		storage.data().subspan(1).data(),
+						// 		data[1],
+						// 		View::view(data.subspan(2)),
+						// 		wproc_query::Storage
+						// 	);
+						// 	if (req > storage.size())
+						// 		storage.resize(req);
+						// }
+						// schema.reflect(data[0]).wproc(
+						// 	storage.data().subspan(1).data(),
+						// 	data[1],
+						// 	View::view(data.subspan(2)),
+						// 	wproc_query::Commit
+						// );
+					}
+					else
+					{
+
+					}
+				}
+				else
+				{
+					// field_bitmap fields{};
+					// fields.set(data[0]);
+					// read(partition->first, sort, fields, [&](std::size_t, View view) {
+					// 	const auto field = info.reflect(data[0]);
+
+					// 	write()
+					// });
+				}
+			}
 		}
 	}
 	void MemoryCache::_reset_impl(write_store::iterator map, View sort) noexcept
@@ -867,9 +976,39 @@ namespace rdb
 	void MemoryCache::write(WriteType type, key_type key, View partition, View sort, std::span<const unsigned char> data) noexcept
 	{
 		RDB_FMT("VCPU{} MC WRITE <{}> {}b", _id, uuid::encode(key, uuid::table_alnum), data.size())
+		RuntimeSchemaReflection::RTSI& schema
+			= RuntimeSchemaReflection::info(_schema);
 		const auto part = _create_partition_log_if(*_map, key, partition);
-		_logs.log(type, key, sort, View::view(data));
-		_write_impl(part, type, sort, data);
+		View sort_key = nullptr;
+		if (sort == nullptr)
+		{
+			RDB_FMT("VCPU{} MC WRITE <{}> MATERIALIZING SORT KEY", _id, uuid::encode(key, uuid::table_alnum))
+			std::size_t size = 0;
+			for (std::size_t i = 0; i < schema.skeys(); i++)
+			{
+				size += schema.skfield(
+					data.data(), i
+				).size();
+			}
+			sort_key = View::copy(size);
+			size = 0;
+			for (std::size_t i = 0; i < schema.skeys(); i++)
+			{
+				const auto field = schema.skfield(data.data(), i);
+				std::memcpy(
+					sort_key.mutate().data() + size,
+					field.data().data(),
+					field.size()
+				);
+				size += field.size();
+			}
+		}
+		else if (schema.skeys())
+		{
+			sort_key = View::view(sort);
+		}
+		_logs.log(type, key, sort_key, View::view(data));
+		_write_impl(part, type, sort_key, data);
 		_flush_if();
 	}
 	void MemoryCache::reset(key_type key, View partition, View sort) noexcept
@@ -1203,6 +1342,7 @@ namespace rdb
 					SharedBufferSink sink(0, 0, source.size());
 					if (float(snappy::Compress(&source, &sink)) / psize < _cfg->cache.compression_ratio)
 					{
+						RDB_FMT("VCPU{} MC FLUSH{} WRITE BLOCK{} COMPRESSED", _id, id, blocks - 1)
 						source.clear();
 						data.vmap_increment(byte::swrite<std::uint32_t>(data.append(), psize));
 						data.vmap_increment(byte::swrite<std::uint32_t>(data.append(), sink.size()));
@@ -1210,6 +1350,7 @@ namespace rdb
 					}
 					else
 					{
+						RDB_FMT("VCPU{} MC FLUSH{} WRITE BLOCK{} RAW", _id, id, blocks - 1)
 						sink.clear();
 						data.vmap_increment(byte::swrite<std::uint32_t>(data.append(), psize));
 						data.vmap_increment(byte::swrite<std::uint32_t>(data.append(), psize));

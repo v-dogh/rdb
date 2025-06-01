@@ -62,9 +62,6 @@ namespace rdb::type
 			return uuid::ugen();
 		}
 	};
-
-	using VTimeUUID = Scalar<"vtuuid", uuid::uint128_t>;
-	using VRandUUID = Scalar<"vruuid", uuid::uint128_t>;
 }
 
 #endif // RDB_TIME_HPP

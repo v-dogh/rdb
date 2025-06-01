@@ -5,111 +5,12 @@
 #include <rdb_locale.hpp>
 #include <Types/rdb_tuple.hpp>
 #include <Types/rdb_scalar.hpp>
+#include <Types/rdb_array_iterator.hpp>
 #include <sstream>
 #include <numeric>
 
 namespace rdb::type
 {
-	namespace impl
-	{
-		template<typename Type, bool Const, bool Trivial>
-		class BufferIterator;
-
-		template<typename Type, bool Const>
-		class BufferIterator<Type, Const, true>
-		{
-		public:
-			using value_type = std::conditional_t<Const, const Type, Type>;
-			using pointer = value_type*;
-			using reference = value_type&;
-			using difference_type = std::ptrdiff_t;
-			using iterator_category = std::random_access_iterator_tag;
-		private:
-			pointer _ptr{ nullptr };
-			std::size_t _size{};
-			std::size_t _idx{};
-		public:
-			explicit BufferIterator(
-				std::size_t idx = 0,
-				std::size_t size = 0,
-				pointer ptr = nullptr
-			) : _ptr(ptr), _size(size), _idx(idx) {}
-
-			reference operator*() const noexcept { return *_ptr; }
-			pointer operator->() const noexcept { return _ptr; }
-
-			reference operator[](difference_type n) const noexcept { return _ptr[n]; }
-
-			BufferIterator& operator++() noexcept { ++_ptr; return *this; }
-			BufferIterator& operator--() noexcept { --_ptr; return *this; }
-
-			BufferIterator operator++(int) noexcept { BufferIterator tmp = *this; ++(*this); return tmp; }
-			BufferIterator operator--(int) noexcept { BufferIterator tmp = *this; --(*this); return tmp; }
-
-			BufferIterator operator+(difference_type n) const noexcept { return BufferIterator(_ptr + n); }
-			BufferIterator operator-(difference_type n) const noexcept { return BufferIterator(_ptr - n); }
-
-			BufferIterator& operator+=(difference_type n) noexcept { _ptr += n; return *this; }
-			BufferIterator& operator-=(difference_type n) noexcept { _ptr -= n; return *this; }
-
-			difference_type operator-(const BufferIterator& other) const noexcept { return _ptr - other._ptr; }
-
-			bool operator==(const BufferIterator& other) const noexcept { return _ptr == other._ptr; }
-			bool operator!=(const BufferIterator& other) const noexcept { return _ptr != other._ptr; }
-			bool operator<(const BufferIterator& other) const noexcept { return _ptr < other._ptr; }
-			bool operator<=(const BufferIterator& other) const noexcept { return _ptr <= other._ptr; }
-			bool operator>(const BufferIterator& other) const noexcept { return _ptr > other._ptr; }
-			bool operator>=(const BufferIterator& other) const noexcept { return _ptr >= other._ptr; }
-		};
-
-		template<typename Type, bool Const>
-		class BufferIterator<Type, Const, false>
-		{
-		public:
-			using value_type = std::conditional_t<Const, const Type, Type>;
-			using pointer = value_type*;
-			using reference = value_type&;
-			using difference_type = std::ptrdiff_t;
-			using iterator_category = std::random_access_iterator_tag;
-		private:
-			pointer _ptr{ nullptr };
-			std::size_t _size{};
-			std::size_t _idx{};
-		public:
-			explicit BufferIterator(
-				std::size_t idx = 0,
-				std::size_t size = 0,
-				pointer ptr = nullptr
-			) : _ptr(ptr), _size(size), _idx(idx) {}
-
-			reference operator*() const noexcept { return *_ptr; }
-			pointer operator->() const noexcept { return _ptr; }
-
-			reference operator[](difference_type n) const noexcept { return _ptr[n]; }
-
-			BufferIterator& operator++() noexcept { ++_ptr; return *this; }
-			BufferIterator& operator--() noexcept { --_ptr; return *this; }
-
-			BufferIterator operator++(int) noexcept { BufferIterator tmp = *this; ++(*this); return tmp; }
-			BufferIterator operator--(int) noexcept { BufferIterator tmp = *this; --(*this); return tmp; }
-
-			BufferIterator operator+(difference_type n) const noexcept { return BufferIterator(_ptr + n); }
-			BufferIterator operator-(difference_type n) const noexcept { return BufferIterator(_ptr - n); }
-
-			BufferIterator& operator+=(difference_type n) noexcept { _ptr += n; return *this; }
-			BufferIterator& operator-=(difference_type n) noexcept { _ptr -= n; return *this; }
-
-			difference_type operator-(const BufferIterator& other) const noexcept { return _ptr - other._ptr; }
-
-			bool operator==(const BufferIterator& other) const noexcept { return _ptr == other._ptr; }
-			bool operator!=(const BufferIterator& other) const noexcept { return _ptr != other._ptr; }
-			bool operator<(const BufferIterator& other) const noexcept { return _ptr < other._ptr; }
-			bool operator<=(const BufferIterator& other) const noexcept { return _ptr <= other._ptr; }
-			bool operator>(const BufferIterator& other) const noexcept { return _ptr > other._ptr; }
-			bool operator>=(const BufferIterator& other) const noexcept { return _ptr >= other._ptr; }
-		};
-	}
-
 	template<typename Type, bool Fragmented>
 	class alignas(std::max(alignof(Type), alignof(std::uint64_t)))
 		BufferBase :
@@ -120,20 +21,25 @@ namespace rdb::type
 		static constexpr auto _is_dynamic = Type::uproperty.is(Type::uproperty.dynamic);
 		static constexpr auto _is_trivial = Type::uproperty.is(Type::uproperty.trivial);
 	public:
+		using view_list = std::span<const TypedView<Type>>;
 		using list = std::initializer_list<TypedView<Type>>;
-		using Iterator = impl::BufferIterator<Type, false, !_is_dynamic>;
-		using ConstIterator = impl::BufferIterator<Type, true, !_is_dynamic>;
+		using trivial_list = std::span<const typename Type::value_type>;
+		using iterator = impl::ArrayIterator<Type, false, !_is_dynamic>;
+		using const_iterator = impl::ArrayIterator<Type, true, !_is_dynamic>;
 
 		struct Reserve
 		{
 			std::size_t size{};
 		};
 	private:
-		static constexpr auto _is_string =
+		static constexpr auto _is_trivial_string =
 			std::is_same_v<Type, Character> ||
 			std::is_same_v<Type, U8Character> ||
 			std::is_same_v<Type, U16Character> ||
 			std::is_same_v<Type, U32Character>;
+		static constexpr auto _is_string =
+			_is_trivial_string ||
+			std::is_same_v<Type, Byte>;
 		static constexpr auto _sbo_max =
 			(sizeof(std::uint64_t) * 2 - 1) / Type::static_storage();
 		static constexpr auto _volume_mask =
@@ -311,42 +217,41 @@ namespace rdb::type
 		}
 	public:
 		template<typename... Argv>
-		static auto mstorage(const Argv&... args) noexcept
+		static auto minline(std::span<unsigned char> view, Argv&&... args) noexcept
 		{
-			if constexpr (sizeof...(Argv))
-			{
-				if constexpr (sizeof...(Argv) < _sbo_max)
-				{
-					return sizeof(BufferBase);
-				}
-				else
-				{
-					return
-						sizeof(BufferBase) +
-						(Type::mstorage(args) + ...);
-				}
-			}
-			else
-			{
-				return sizeof(BufferBase);
-			}
+			const auto s = mstorage(args...);
+			new (view.data()) BufferBase{ std::forward<Argv>(args)... };
+			return s;
 		}
-		static auto mstorage(const list& cpy) noexcept
+
+		static auto minline(std::span<unsigned char> view, const std::basic_string<typename Type::value_type>& str) noexcept
+			requires _is_string
 		{
+			return minline(view, std::basic_string_view<typename Type::value_type>(str));
+		}
+
+		static auto mstorage(view_list cpy) noexcept
+		{
+			std::size_t size = 0;
 			if constexpr (_is_dynamic)
 			{
-				return mstorage() + std::accumulate(cpy.begin(), cpy.end(), std::size_t{ 0 }, [](const auto& value, std::size_t ctr) {
+				size = std::accumulate(cpy.begin(), cpy.end(), std::size_t{ 0 }, [](const auto& value, std::size_t ctr) {
 					return ctr + value->storage();
 				});
 			}
 			else
 			{
-				return
-					mstorage() +
-					cpy.size() * Type::static_storage();
+				size = cpy.size() * Type::static_storage();
 			}
+			if (size > _sbo_max)
+				return sizeof(BufferBase) + size;
+			return sizeof(BufferBase);
 		}
-		static auto mstorage(const Reserve& res) noexcept
+		static auto mstorage(list cpy) noexcept
+		{
+			return mstorage(view_list(cpy.begin(), cpy.end()));
+		}
+		static auto mstorage(Reserve res) noexcept
 		{
 			if (res.size)
 			{
@@ -367,6 +272,11 @@ namespace rdb::type
 			}
 		}
 
+		static auto mstorage(const std::basic_string<typename Type::value_type>& value)
+			requires _is_string
+		{
+			return mstorage(Reserve(value.size()));
+		}
 		static auto mstorage(std::basic_string_view<typename Type::value_type> value)
 			requires _is_string
 		{
@@ -381,13 +291,45 @@ namespace rdb::type
 				>(ptr)
 			);
 		}
+		static auto mstorage(trivial_list str)
+			requires _is_trivial
+		{
+			return mstorage(
+				std::basic_string_view<
+					typename Type::value_type
+				>(str.begin(), str.end())
+			);
+		}
 
 		template<typename... Argv>
-		static auto minline(std::span<unsigned char> view, Argv&&... args) noexcept
+		static auto mstorage(const Argv&... args) noexcept
 		{
-			const auto s = mstorage(args...);
-			new (view.data()) BufferBase{ std::forward<Argv>(args)... };
-			return s;
+			if constexpr (sizeof...(Argv))
+			{
+				if constexpr (sizeof...(Argv) < _sbo_max)
+				{
+					return sizeof(BufferBase);
+				}
+				else
+				{
+					if constexpr (_is_dynamic)
+					{
+						return
+							sizeof(BufferBase) +
+							(Type::mstorage(args) + ...);
+					}
+					else
+					{
+						return
+							sizeof(BufferBase) +
+							(Type::static_storage() * sizeof...(Argv));
+					}
+				}
+			}
+			else
+			{
+				return sizeof(BufferBase);
+			}
 		}
 
 		BufferBase()
@@ -399,8 +341,10 @@ namespace rdb::type
 			requires (
 				!std::is_same_v<std::decay_t<Arg>, Reserve> &&
 				!std::is_same_v<std::decay_t<Arg>, list> &&
+				!std::is_same_v<std::decay_t<Arg>, view_list> &&
 				!std::is_same_v<std::decay_t<Arg>, const typename Type::value_type*> &&
-				!std::is_same_v<std::decay_t<Arg>, std::basic_string_view<typename Type::value_type>>
+				!std::is_same_v<std::decay_t<Arg>, std::basic_string_view<typename Type::value_type>>,
+				!std::is_same_v<std::decay_t<Arg>, trivial_list>
 			)
 		{
 			_set_size(sizeof...(Argv) + 1);
@@ -417,21 +361,24 @@ namespace rdb::type
 			(write(std::forward<Argv>(args)), ...);
 			_set_volume(off, sizeof...(Argv) + 1);
 		}
-		explicit BufferBase(list res)
+		explicit BufferBase(list li) :
+			BufferBase(std::span(li.begin(), li.end()))
+		{}
+		explicit BufferBase(view_list li)
 		{
-			_set_size(res.size());
+			_set_size(li.size());
 			std::size_t off = 0;
-			for (decltype(auto) it : res)
+			for (decltype(auto) it : li)
 			{
 				const auto beg = off;
 				off += it.size();
 				std::memcpy(
-					_binary_buffer(beg),
+					_buffer(beg),
 					it.data().data(),
 					it.size()
 				);
 			}
-			_set_volume(off, res.size());
+			_set_volume(off, li.size());
 		}
 		explicit BufferBase(const Reserve& res)
 		{
@@ -451,6 +398,16 @@ namespace rdb::type
 				str.size() * sizeof(typename Type::value_type)
 			);
 		}
+		explicit BufferBase(trivial_list str)
+			requires _is_trivial
+		{
+			_set_dims(str.size(), str.size() * Type::static_storage());
+			std::memcpy(
+				_buffer(),
+				str.data(),
+				str.size() * sizeof(typename Type::value_type)
+			);
+		}
 
 		enum rOp : proc_opcode
 		{
@@ -462,7 +419,9 @@ namespace rdb::type
 			// [ Offset, Values ]
 			Insert = 'i',
 			// [ Offset, Value ]
-			Write = 'w'
+			Write = 'w',
+			// [ Offset Values ]
+			Overwrite = 'O'
 		};
 		enum fOp : proc_opcode
 		{
@@ -492,6 +451,10 @@ namespace rdb::type
 		{
 			using param = Tuple<Uint64, Type>;
 		};
+		template<> struct WritePair<wOp::Overwrite>
+		{
+			using param = Tuple<Uint64, BufferBase>;
+		};
 
 		template<fOp Op>
 		struct FilterPair
@@ -513,34 +476,40 @@ namespace rdb::type
 			return *_at_impl(idx);
 		}
 
-		Iterator begin() noexcept
+		typename Type::value_type* data() noexcept
+			requires _is_trivial
 		{
-			return Iterator(
+			return _buffer();
+		}
+
+		iterator begin() noexcept
+		{
+			return iterator(
 				0,
 				_size(),
 				_buffer()
 			);
 		}
-		Iterator end() noexcept
+		iterator end() noexcept
 		{
-			return Iterator(
+			return iterator(
 				_size(),
 				_size(),
 				_buffer()
 			);
 		}
 
-		ConstIterator begin() const noexcept
+		const_iterator begin() const noexcept
 		{
-			return ConstIterator(
+			return const_iterator(
 				0,
 				_size(),
 				_buffer()
 			);
 		}
-		ConstIterator end() const noexcept
+		const_iterator end() const noexcept
 		{
-			return ConstIterator(
+			return const_iterator(
 				_size(),
 				_size(),
 				_buffer()
@@ -575,7 +544,7 @@ namespace rdb::type
 		}
 		std::string print() const noexcept
 		{
-			if constexpr (_is_string)
+			if constexpr (_is_trivial_string)
 			{
 				return std::format("'{}'",
 					std::basic_string_view<typename Type::value_type>(
@@ -709,7 +678,7 @@ namespace rdb::type
 		public Interface<
 			Buffer<Type>,
 			cmp::concat_const_string<"buf<", Type::cuname, ">">(),
-			true
+			InterfaceProperty::dynamic
 		>
 	{ };
 
@@ -719,7 +688,7 @@ namespace rdb::type
 		public Interface<
 			FragmentedBuffer<Type>,
 			cmp::concat_const_string<"fbuf<", Type::cuname, ">">(),
-			true
+			InterfaceProperty::dynamic | InterfaceProperty::fragmented
 		>
 	{ };
 

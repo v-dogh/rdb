@@ -21,6 +21,15 @@ namespace rdb
 			);
 		}
 
+		template<typename Type>
+		constexpr std::span<const unsigned char> sspan(const Type& value) noexcept
+		{
+			return std::span(
+				reinterpret_cast<const unsigned char*>(value.data()),
+				value.size() * sizeof(value[0])
+			);
+		}
+
 		constexpr bool is_storage_endian() noexcept
 		{
 			return std::endian::native == std::endian::little;

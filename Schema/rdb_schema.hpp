@@ -237,6 +237,8 @@ namespace rdb
 		template<cmp::ConstString Name>
 		using interface = SearchField<Name>::interface;
 		template<cmp::ConstString Name>
+		using interface_view = TypedView<typename SearchField<Name>::interface>;
+		template<cmp::ConstString Name>
 		using field_type = SearchField<Name>::field;
 	private:
 		template<cmp::ConstString Key, cmp::ConstString... Rest>
@@ -358,7 +360,7 @@ namespace rdb
 		auto _field_impl() noexcept
 		{
 			using field = SearchField<Name>;
-			if constexpr (AreStatic::Value)
+			if constexpr (AreStatic::value)
 			{
 				return TypedView<typename field::interface>::view(
 					std::span(
@@ -371,18 +373,18 @@ namespace rdb
 			{
 				std::size_t off = 0;
 				std::size_t len = 0;
-				_for_each([&]<typename Field>() {
-					if constexpr (Field::uname != Name.view())
+				([&]() {
+					if constexpr (Fields::name == Name.view())
 					{
-						len = _at<Field>(off)->storage();
+						len = _at<typename Fields::interface>(off)->storage();
 						return true;
 					}
 					else
 					{
-						off += _at<Field>(off)->storage();
+						off += _at<typename Fields::interface>(off)->storage();
 						return false;
 					}
-				});
+				}() || ...);
 				return TypedView<typename field::interface>::view(
 					std::span(
 						reinterpret_cast<unsigned char*>(this) + off,
@@ -462,29 +464,8 @@ namespace rdb
 		template<typename... Argv>
 		static constexpr auto make(Argv&&... args) noexcept
 		{
-			std::size_t size = 0;
-			std::size_t off = 0;
-			_for_each([&]<typename Field>() {
-				size += Field::interface::mstorage();
-			});
-			auto data = value::copy(size);
-			if constexpr (sizeof...(Argv))
-			{
-				_for_each([&]<typename Field, typename Arg>(Arg&& arg) {
-					off += Field::interface::minline(
-						data.mutate().subspan(off),
-						std::forward<Arg>(arg)
-					);
-				}, std::forward<Argv>(args)...);
-			}
-			else
-			{
-				_for_each([&]<typename Field>() {
-					off += Field::interface::minline(
-						data.mutate().subspan(off)
-					);
-				}, std::forward<Argv>(args)...);
-			}
+			auto data = value::copy(mstorage(args...));
+			minline(data.mutate(), std::forward<Argv>(args)...);
 			return data;
 		}
 		static constexpr version_type topology(std::size_t cutoff = ~0ull) noexcept
@@ -515,20 +496,46 @@ namespace rdb
 		{
 			return std::max({ alignof(Fields)... });
 		}
-		static constexpr auto mstorage() noexcept
+		template<typename... Argv>
+		static constexpr auto mstorage(Argv&&... args) noexcept
 		{
 			std::size_t size = 0;
-			_for_each([&]<typename Field>() {
-				size += Field::interface::mstorage();
-			});
+			if constexpr (sizeof...(args))
+			{
+				([&]() {
+					size += Fields::interface::mstorage(args);
+				}(), ...);
+			}
+			else
+			{
+				([&]() {
+					size += Fields::interface::mstorage();
+				}(), ...);
+			}
 			return size;
 		}
-		static auto minline(std::span<unsigned char> data) noexcept
+		template<typename... Argv>
+		static auto minline(std::span<unsigned char> data, Argv&&... args) noexcept
 		{
 			std::size_t off = 0;
-			_for_each([&]<typename Field>() {
-				off += Field::interface::minline(data.subspan(off));
-			});
+			if constexpr (sizeof...(args))
+			{
+				([&]() {
+					off += Fields::interface::minline(
+						data.subspan(off),
+						std::forward<Argv>(args)
+					);
+				}(), ...);
+			}
+			else
+			{
+				([&]() {
+					off += Fields::interface::minline(
+						data.subspan(off)
+					);
+				}(), ...);
+			}
+			return off;
 		}
 		static constexpr auto mstorage_init_keys(View view) noexcept
 		{

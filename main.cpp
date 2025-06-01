@@ -1,6 +1,6 @@
-#include <iostream>
 #include <rdb_mount.hpp>
 #include <rdb_types.hpp>
+#include <iostream>
 
 // READ PATH ISSUE
 // eq_comparator (sort key wide partition reads) expects a full schema instance???
@@ -12,31 +12,52 @@
 // solution 1. overwrite them no matter what, before sending
 // solution 2. do some template stuff so that the sort key fields are constructed with the data from fetch
 //             but the ::make function itself default initializes sort key fields and passes the args to the rest
+// Handle wproc if not in cache, i.g. we would read apply and write to the memory cache
+// Handle fragmented writes (i guess a new data type)
+// FRAGMENTED DATA TYPES IN COMPOSABLE DATA TYPES
+// Fail at compile time if a fragmented type is passed to a composable type
+// I.e. buffers arrays tuples nullables etc.
 
 int main()
 {
 	std::filesystem::remove_all("/tmp/RDB/vcpu0");
 
+	using user = rdb::Schema<"User",
+		rdb::Topology<rdb::Field<"ID", rdbt::TimeUUID>>,
+		rdb::Topology<
+			rdb::Field<"Name", rdbt::String>,
+			rdb::Field<"Flags", rdbt::Bitset<32>>,
+			rdb::Field<"Address", rdbt::String>,
+			rdb::Field<"Profile", rdbt::Uint64>,
+			rdb::Field<"Nonce", rdbt::Uint32>,
+			rdb::Field<"Password", rdbt::BinaryArray<32>>,
+			rdb::Field<"Salt", rdbt::BinaryArray<16>>,
+			rdb::Field<"Auth", rdbt::Nullable<rdbt::BinaryArray<32>>>
+		>
+	>;
+	using auth_key = rdb::Schema<"UserAuth",
+		rdb::Topology<rdb::Field<"ID", rdbt::TimeUUID>>,
+		rdb::Topology<rdb::Field<"Key", rdbt::BinaryArray<32>>>
+	>;
+	using user_lookup = rdb::Schema<"UserLookup",
+		rdb::Topology<rdb::Field<"Name", rdbt::String>>,
+		rdb::Topology<rdb::Field<"ID", rdbt::TimeUUID>>
+	>;
+
 	using message = rdb::Schema<"Message",
-		rdb::Topology<rdb::Field<"ChannelID", rdbt::VRandUUID>>,
+		rdb::Topology<rdb::Field<"ChannelID", rdbt::RandUUID>>,
 		rdb::Topology<
 			rdb::Field<"ID", rdbt::TimeUUID, rdb::FieldType::Sort>,
-			rdb::Field<"SenderID", rdbt::Hash>,
+			rdb::Field<"SenderID", rdbt::TimeUUID>,
 			rdb::Field<"Flags", rdbt::Bitset<32>>,
 			rdb::Field<"Message", rdbt::Binary>
 		>
 	>;
-	using schema = rdb::Schema<"Message",
-		rdb::Topology<rdb::Field<"A", rdbt::Uint64>>,
-		rdb::Topology<
-			rdb::Field<"Q", rdbt::String>,
-			rdb::Field<"B", rdbt::Uint32>,
-			rdb::Field<"C", rdbt::Uint32, rdb::FieldType::Sort>
-		>
-	>;
 
-	rdb::require<schema>();
 	rdb::require<message>();
+	rdb::require<user>();
+	rdb::require<user_lookup>();
+	rdb::require<auth_key>();
 
 	rdb::Mount::ptr mnt =
 		rdb::Mount::make({
@@ -47,48 +68,45 @@ int main()
 		});
 	mnt->start();
 
-	mnt->run<schema>([](rdb::MemoryCache* cache) {
-		cache->clear();
+	bool result = true;
+	mnt->query
+		<< rdb::compose(
+			rdb::check<user>(&result, rdb::uuid::uint128_t())
+			   < rdb::exists
+		)
+		<< rdb::execute<>;
+	std::cout << result << std::endl;
+
+	mnt->run<user>([](rdb::MemoryCache* cache) {
+		std::cout << cache->exists(0x00, nullptr) << std::endl;
 	});
 
-	auto send_message = [&](
-		const std::string& sender,
-		const rdb::uuid::uint128_t& channel,
-		const std::string& data)
-	{
-		mnt->query
-			<< rdb::compose(
-				rdb::fetch<message>(rdbt::RandUUID::value_type(), rdbt::TimeUUID::value_type())
-				| rdb::reset
-			)
-			<< rdb::execute<>;
-	};
+	// mnt->run<message>([](rdb::MemoryCache* cache) {
+	// 	cache->clear();
+	// });
+
+	// auto send_message = [&](
+	// 	const std::string& sender,
+	// 	const rdb::uuid::uint128_t& channel,
+	// 	const std::string& data)
+	// {
+	// 	mnt->query
+	// 		<< rdb::create<message>(
+	// 			rdb::uuid::uint128_t(),
+	// 			rdbt::TimeUUID::id(),
+	// 			rdbt::TimeUUID::id(),
+	// 			rdbt::Bitset<32>::list(),
+	// 			rdb::byte::sspan(data)
+	// 		)
+	// 		<< rdb::execute<>;
+	// };
 
 	// send_message("A", {}, "Hello World User B!");
 	// send_message("B", {}, "Hello World User A!");
 
-	// mnt->query
-	// 	<< rdb::compose(
-	// 		rdb::fetch<schema>(0, 0xFA)
-	// 		| rdb::reset
-	// 		| rdb::write<"B">(0xFB)
-	// 		// | rdb::write<"C">(0xFA)
-	// 		| rdb::write<"Q">((const char*)("abcd"))
-	// 	)
-	// 	<< rdb::execute<>;
-
-	// rdb::TypedView<rdbt::String> result = nullptr;
-	// mnt->query
-	// 	<< rdb::compose(
-	// 		rdb::fetch<schema>(0, 0xFA)
-	// 		| rdb::read<"Q">(&result)
-	// 	)
-	// 	<< rdb::execute<>;
-	// std::cout << result->print() << std::endl;
-
-	mnt->run<schema>([](rdb::MemoryCache* cache) {
-		cache->flush();
-	});
+	// mnt->run<message>([](rdb::MemoryCache* cache) {
+	// 	cache->flush();
+	// });
 
 	mnt->wait();
 }

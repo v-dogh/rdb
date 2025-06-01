@@ -3,7 +3,6 @@
 
 #include <bitset>
 #include <chrono>
-#include <cmath>
 #include <cstring>
 #include <numeric>
 #include <string_view>
@@ -543,15 +542,16 @@ namespace rdb
 			{
 				return StackView<In, Al>::copy(data());
 			}
-			else if (std::holds_alternative<std::aligned_storage_t<Inline, Align>>(_data))
+			else if (std::holds_alternative<sbo>(_data))
 			{
 				StackView<In, Al> view;
-				auto& from = std::get<std::aligned_storage_t<Inline, Align>>(_data);
-				auto& to = (view._data = std::aligned_storage_t<In, Al>());
-				std::copy(
-					reinterpret_cast<const unsigned char*>(&from),
-					reinterpret_cast<const unsigned char*>(&from) + sizeof(from),
-					reinterpret_cast<unsigned char*>(&to)
+				auto& from = std::get<sbo>(_data);
+				auto& to = view._data.template emplace<typename StackView<In, Al>::sbo>();
+				to.second = from.second;
+				std::memcpy(
+					&to.first,
+					&from.first,
+					sizeof(from.first)
 				);
 				return view;
 			}

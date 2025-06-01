@@ -6,6 +6,8 @@
 #include <Types/rdb_time.hpp>
 #include <Types/rdb_tuple.hpp>
 #include <Types/rdb_bitset.hpp>
+#include <Types/rdb_array.hpp>
+#include <Types/rdb_nullable.hpp>
 
 namespace rdbt = rdb::type;
 

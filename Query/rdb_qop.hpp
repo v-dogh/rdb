@@ -5,17 +5,27 @@ namespace rdb::cmd
 {
 	enum class qOp : char
 	{
-		Fetch = 'f',
-		Reset = 'R',
-		Rewrite = 'N',
-		Remove = 'P',
-		Write = 'w',
-		Read = 'r',
-		Dump = 'd',
-		Compare = '=',
-		Conditional = '?',
-		WProc = '+',
-		RProc = '-'
+		// Operands
+
+		Fetch,
+		Create,
+		Reset,
+		Remove,
+		Write,
+		Read,
+		Dump,
+		WProc,
+		RProc,
+
+		// Filter operands
+
+		Check,
+		Conditional,
+
+		// Filters
+
+		FilterCompare,
+		FilterExists
 	};
 }
 

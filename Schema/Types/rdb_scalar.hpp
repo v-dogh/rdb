@@ -18,14 +18,14 @@ namespace rdb::type
 		{
 			return sizeof(ScalarBase);
 		}
-		static auto minline(std::span<unsigned char> view, Type value = {}) noexcept
+		static auto minline(std::span<unsigned char> view, const Type& value = {}) noexcept
 		{
 			new (view.data()) ScalarBase(value);
 			return sizeof(ScalarBase);
 		}
 
 		ScalarBase() = default;
-		explicit ScalarBase(Type value)
+		explicit ScalarBase(const Type& value)
 			: _value(byte::byteswap_for_storage(value)) {}
 
 		enum rOp : proc_opcode { };
@@ -54,6 +54,10 @@ namespace rdb::type
 		};
 
 		const Type* underlying() const noexcept
+		{
+			return &_value;
+		}
+		Type* underlying() noexcept
 		{
 			return &_value;
 		}

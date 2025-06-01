@@ -107,6 +107,7 @@ namespace rdb
 		std::size_t _vcpu(std::uint32_t key) const noexcept;
 		std::size_t _query_parse_operand(std::span<const unsigned char> packet, ParserState& state, ParserInfo info) noexcept;
 		std::size_t _query_parse_schema_operator(std::span<const unsigned char> packet, key_type key, View partition, View sort, schema_type schema, ParserState& state, ParserInfo& info) noexcept;
+		std::size_t _query_parse_predicate_operator(std::span<const unsigned char> packet, key_type key, View partition, View sort, schema_type schema, ParserState& state, ParserInfo& info) noexcept;
 	public:
 		friend class QueryEngine;
 		QueryEngine& query{ *this };
@@ -120,6 +121,10 @@ namespace rdb
 		Mount(Config cfg) : _cfg(cfg) {}
 		Mount(const Mount&) = delete;
 		Mount(Mount&&) = delete;
+		~Mount()
+		{
+			stop();
+		}
 
 		std::size_t cores() const noexcept;
 

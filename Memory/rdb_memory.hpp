@@ -105,6 +105,8 @@ namespace rdb
 		Config* _cfg{ nullptr };
 		Log _logs{};
 
+		std::pair<View, bool> _apply_wproc(std::variant<View, SharedBuffer> data, std::size_t field, proc_opcode opcode, proc_param params) noexcept;
+
 		std::size_t _cpu() const noexcept;
 
 		FlushHandle& _handle_open(std::size_t flush) const noexcept;
@@ -125,8 +127,10 @@ namespace rdb
 		slot& _emplace_slot(write_store::iterator partition, View sort) noexcept;
 
 		std::size_t _read_entry_size_impl(View view) noexcept;
-		std::size_t _read_entry_impl(View view, field_bitmap& fields, const read_callback& callback) noexcept;
-		std::size_t _read_cache_impl(const write_store& map, key_type key, View sort, field_bitmap& fields, const read_callback& callback) noexcept;
+		std::size_t _read_entry_impl(View view, field_bitmap& fields, const read_callback* callback) noexcept;
+		std::size_t _read_cache_impl(const write_store& map, key_type key, View sort, field_bitmap& fields, const read_callback* callback) noexcept;
+
+		bool _read_impl(key_type key, View sort, field_bitmap fields, const read_callback* callback) noexcept;
 
 		write_store::iterator _create_partition_log_if(write_store& map, key_type key, View partition) noexcept;
 		write_store::iterator _create_partition_if(write_store& map, key_type key, View partition) noexcept;
@@ -159,6 +163,7 @@ namespace rdb
 		std::size_t descriptors() const noexcept;
 
 		void read(key_type key, View sort, field_bitmap fields, const read_callback& callback) noexcept;
+		bool exists(key_type key, View sort) noexcept;
 
 		void write(WriteType type, key_type key, View partition, View sort, std::span<const unsigned char> data) noexcept;
 		void reset(key_type key, View partition, View sort) noexcept;
