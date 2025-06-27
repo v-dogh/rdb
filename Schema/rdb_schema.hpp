@@ -59,9 +59,6 @@ namespace rdb
 		{ Type::uname } -> std::convertible_to<std::string_view>;
 		{ Type::ucode } -> std::convertible_to<std::size_t>;
 		{ Type::uproperty };
-		{ typename Type::rOp() } -> std::convertible_to<proc_opcode>;
-		{ typename Type::wOp() } -> std::convertible_to<proc_opcode>;
-		{ typename Type::fOp() } -> std::convertible_to<proc_opcode>;
 		// { Type::WritePair<Opcode>::param }
 		// { Type::ReadPair<Opcode>::param Type::ReadPair<Opcode>::result }
 	};
@@ -76,13 +73,13 @@ namespace rdb
 	class InterfaceHelper
 	{
 	protected:
-		const void* _dynamic_field() const noexcept
+		const void* _dynamic_field(std::size_t idx = sizeof(Base)) const noexcept
 		{
-			return static_cast<const Base*>(this + 1);
+			return reinterpret_cast<const unsigned char*>(this) + idx;
 		}
-		void* _dynamic_field() noexcept
+		void* _dynamic_field(std::size_t idx = sizeof(Base)) noexcept
 		{
-			return static_cast<Base*>(this + 1);
+			return reinterpret_cast<unsigned char*>(this) + idx;
 		}
 	};
 
@@ -111,8 +108,8 @@ namespace rdb
 	struct InterfaceProperty
 	{
 		static constexpr std::uint64_t trivial = 1 << 0;
-		static constexpr std::uint64_t dynamic = 1 << 0;
-		static constexpr std::uint64_t fragmented = 1 << 0;
+		static constexpr std::uint64_t dynamic = 1 << 1;
+		static constexpr std::uint64_t fragmented = 1 << 2;
 		std::uint64_t value{ trivial };
 
 		constexpr InterfaceProperty() = default;
@@ -123,6 +120,100 @@ namespace rdb
 			return (value & property) == property;
 		}
 	};
+
+	namespace impl
+	{
+		template<std::size_t Idx, typename... Args>
+		struct FindNth
+		{
+			using type = void;
+		};
+		template<typename Arg, typename... Argv>
+		struct FindNth<0, Arg, Argv...>
+		{
+			using type = Arg;
+		};
+		template<std::size_t Idx, typename Arg, typename... Argv>
+		struct FindNth<Idx, Arg, Argv...>
+		{
+			using type = typename FindNth<Idx - 1, Argv...>::type;
+		};
+	}
+
+	template<typename First, typename Second> struct ReadPair { using param = First; using result = Second; };
+	template<typename... Argv> struct DeclWrite
+	{
+		static constexpr auto wcount = sizeof...(Argv);
+		template<proc_opcode Opcode>
+		using FindType = impl::FindNth<Opcode, Argv...>::type;
+	};
+	template<typename... Argv> struct DeclRead
+	{
+		static constexpr auto rcount = sizeof...(Argv);
+		template<proc_opcode Opcode>
+		using FindType = impl::FindNth<Opcode, Argv...>::type;
+	};
+	template<typename... Argv> struct DeclFilter
+	{
+		static constexpr auto fcount = sizeof...(Argv);
+		template<proc_opcode Opcode>
+		using FindType = impl::FindNth<Opcode, Argv...>::type;
+	};
+
+	namespace impl
+	{
+		struct EmptyProcBase
+		{
+			struct Op
+			{
+			protected:
+				using write_type = DeclWrite<>;
+				using read_type = DeclRead<>;
+				using filter_type = DeclFilter<>;
+			public:
+				static constexpr auto wbase = 0;
+				static constexpr auto rbase = 0;
+				static constexpr auto fbase = 0;
+
+				enum w : proc_opcode {};
+				enum r : proc_opcode {};
+				enum f : proc_opcode {};
+			};
+		};
+	}
+
+	template<typename Base, typename Write, typename Filter, typename Read>
+	class InterfaceDeclProc : public Base::Op
+	{
+	protected:
+		using write_type = Write;
+		using read_type = Read;
+		using filter_type = Filter;
+	public:
+		using BaseOp = Base::Op;
+		using typename Base::Op::r;
+		using typename Base::Op::w;
+		using typename Base::Op::f;
+
+		static constexpr auto wbase =
+			BaseOp::wbase + BaseOp::write_type::wcount;
+		static constexpr auto rbase =
+			BaseOp::rbase + BaseOp::read_type::rcount;
+		static constexpr auto fbase =
+			BaseOp::fbase + BaseOp::filter_type::fcount;
+
+		template<proc_opcode Opcode> using wtype =
+			std::conditional_t<Opcode >= wbase, InterfaceDeclProc, BaseOp>
+				::write_type::template FindType<Opcode - (wbase * (Opcode >= wbase))>;
+		template<proc_opcode Opcode> using rtype =
+			std::conditional_t<Opcode >= rbase, InterfaceDeclProc, BaseOp>
+				::read_type::template FindType<Opcode - (rbase * (Opcode >= rbase))>;
+		template<proc_opcode Opcode> using ftype =
+			std::conditional_t<Opcode >= fbase, InterfaceDeclProc, BaseOp>
+				::filter_type::template FindType<Opcode - (fbase * (Opcode >= fbase))>;
+	};
+	template<typename Write, typename Filter, typename Read>
+	using InterfaceDeclProcPrimary = InterfaceDeclProc<impl::EmptyProcBase, Write, Filter, Read>;
 
 	template<typename Base, cmp::ConstString UniqueName, InterfaceProperty Property = InterfaceProperty(), typename Accumulator = void, typename Compressor = void>
 	struct Interface
@@ -140,9 +231,9 @@ namespace rdb
 				[](const void* ptr) { return static_cast<const Base*>(ptr)->storage(); },
 				[]() { return sizeof(Base); },
 				[](const void* ptr) { return static_cast<const Base*>(ptr)->hash(); },
-				[](void* ptr, proc_opcode o, proc_param p, wproc_query q) { return static_cast<Base*>(ptr)->wproc(o, proc_param::view(p), q); },
-				[](const void* ptr, proc_opcode o, proc_param p) { return static_cast<const Base*>(ptr)->rproc(o, proc_param::view(p)); },
-				[](const void* ptr, proc_opcode o, proc_param p) { return static_cast<const Base*>(ptr)->fproc(o, proc_param::view(p)); },
+				[](void* ptr, proc_opcode o, const proc_param& p, wproc_query q) { return static_cast<Base*>(ptr)->wproc(o, p, q); },
+				[](const void* ptr, proc_opcode o, const proc_param& p) { return static_cast<const Base*>(ptr)->rproc(o, p); },
+				[](const void* ptr, proc_opcode o, const proc_param& p) { return static_cast<const Base*>(ptr)->fproc(o, p); },
 				[]() { return uproperty.is(uproperty.fragmented); },
 				[]() { return AccumulatorHandle::make<Accumulator>(); },
 				[]() { return CompressorHandle::make<Compressor>(); }
@@ -280,8 +371,10 @@ namespace rdb
 		static constexpr auto sort_count = SortCountImpl<Fields::cname...>::count;
 		template<std::size_t Idx> static constexpr auto sort = SearchSortKey<Idx>::field::cname;
 		template<std::size_t Idx> static constexpr auto sort_order = SearchSortKey<Idx>::field::order;
-		template<cmp::ConstString Key> static constexpr auto has =
+		template<cmp::ConstString Key> static constexpr auto has_sort_key =
 			(field_type<Key>::type == FieldType::Sort);
+		template<cmp::ConstString Field> static constexpr auto has =
+			!std::is_same_v<void, typename SearchField<Field>::type>;
 	private:
 		template<typename Func>
 		static constexpr void _for_each(Func&& callback, auto&&... args) noexcept
@@ -461,6 +554,86 @@ namespace rdb
 			(Fields::interface::require(), ...);
 		};
 	public:
+		static bool sort_keys_equal(View lhs, View rhs) noexcept
+		{
+			const auto* ldata = lhs.data().data();
+			const auto* rdata = rhs.data().data();
+			std::size_t off1 = 0;
+			std::size_t off2 = 0;
+
+			return ([&]() -> bool {
+				if constexpr (Fields::type == FieldType::Sort)
+				{
+					const auto* v1 = reinterpret_cast<const Fields::interface*>(ldata + off1);
+					const auto* v2 = reinterpret_cast<const Fields::interface*>(rdata + off2);
+					const auto v2p = View::view(std::span(rdata + off2, std::dynamic_extent));
+					if (v1->fproc(proc_opcode(SortFilterOp::Equal), v2p))
+						return true;
+					off1 += v1->storage();
+					off2 += v2->storage();
+					return false;
+				}
+				return true;
+			}() && ...);
+		}
+		static bool sort_keys_order(View lhs, View rhs) noexcept
+		{
+			const auto* ldata = lhs.data().data();
+			const auto* rdata = rhs.data().data();
+			std::size_t off1 = 0;
+			std::size_t off2 = 0;
+
+			return ([&]() -> bool {
+				if constexpr (Fields::type == FieldType::Sort)
+				{
+					const auto ordering = Fields::order;
+					const auto* v1 = reinterpret_cast<const Fields::interface*>(ldata + off1);
+					const auto* v2 = reinterpret_cast<const Fields::interface*>(rdata + off2);
+					const auto v2p = View::view(std::span(rdata + off2, std::dynamic_extent));
+					if (v1->fproc(proc_opcode(SortFilterOp::Smaller), v2p))
+						return ordering == Order::Ascending;
+					if (v1->fproc(proc_opcode(SortFilterOp::Larger), v2p))
+						return ordering != Order::Ascending;
+					off1 += v1->storage();
+					off2 += v2->storage();
+					return false;
+				}
+				return false;
+			}() || ...);
+		}
+		static int sort_keys_compare(View lhs, View rhs) noexcept
+		{
+			const auto* ldata = lhs.data().data();
+			const auto* rdata = rhs.data().data();
+			std::size_t off1 = 0;
+			std::size_t off2 = 0;
+			int result = 0;
+
+			([&]() -> bool {
+				if constexpr (Fields::type == FieldType::Sort)
+				{
+					const auto* v1 = reinterpret_cast<const Fields::interface*>(ldata + off1);
+					const auto* v2 = reinterpret_cast<const Fields::interface*>(rdata + off2);
+					const auto v2p = View::view(std::span(rdata + off2, std::dynamic_extent));
+					if (v1->fproc(proc_opcode(SortFilterOp::Smaller), v2p))
+					{
+						result = -1;
+						return true;
+					}
+					if (v1->fproc(proc_opcode(SortFilterOp::Larger), v2p))
+					{
+						result = 1;
+						return true;
+					}
+					off1 += v1->storage();
+					off2 += v2->storage();
+				}
+				return false;
+			}() || ...);
+
+			return result;
+		}
+
 		template<typename... Argv>
 		static constexpr auto make(Argv&&... args) noexcept
 		{
@@ -592,6 +765,23 @@ namespace rdb
 				idx, std::make_index_sequence<sizeof...(Fields)>()
 			);
 		}
+		static std::string show() noexcept
+		{
+			std::stringstream out;
+
+			out << "<";
+			std::size_t off = 0;
+			_for_each([&]<typename Field>() {
+				out << "\n"
+					<< "\t'"
+					<< Field::name
+					<< "' @"
+					<< Field::interface::uname;
+			});
+			out << "\n>";
+
+			return out.str();
+		}
 
 		Topology() = default;
 		Topology(const Topology&) = default;
@@ -704,8 +894,8 @@ namespace rdb
 				buffer
 			);
 		}
-		template<cmp::ConstString Name, interface<Name>::wOp Op>
-		std::size_t apply_write(TypedView<typename interface<Name>::template WritePair<Op>::param> data, std::size_t buffer) noexcept
+		template<cmp::ConstString Name, interface<Name>::Op::w Op>
+		std::size_t apply_write(TypedView<typename interface<Name>::Op::template wtype<Op>::param> data, std::size_t buffer) noexcept
 		{
 			return apply_write(
 				index_of<Name>(),
@@ -714,11 +904,11 @@ namespace rdb
 				buffer
 			);
 		}
-		template<cmp::ConstString Name, interface<Name>::wOp Op, typename... Argv>
+		template<cmp::ConstString Name, interface<Name>::Op::w Op, typename... Argv>
 		std::size_t apply_write(std::size_t buffer, Argv&&... args) noexcept
 		{
 			const auto data = interface<Name>
-				::template WritePair<Op>
+				::Op::template wtype<Op>
 				::param::make(std::forward<Argv>(args)...);
 			return apply_write(
 				index_of<Name>(),
@@ -824,6 +1014,7 @@ namespace rdb
 			}
 		}
 	public:
+		using topology = Topology;
 		using partition = Partition;
 		using data = Topology;
 		static constexpr schema_type ucode = uuid::hash<schema_type>(*Name);
@@ -849,18 +1040,18 @@ namespace rdb
 		{
 			Topology::require_fields();
 			RuntimeSchemaReflection::reg(ucode, RuntimeSchemaReflection::RTSI{
-				[](void* ptr, View sort) { Topology::minline_init_keys(std::span(static_cast<unsigned char*>(ptr), std::dynamic_extent), sort); },
-				[](View sort) { return Topology::mstorage_init_keys(sort); },
+				[](void* ptr, const View& sort) { Topology::minline_init_keys(std::span(static_cast<unsigned char*>(ptr), std::dynamic_extent), sort); },
+				[](const View& sort) { return Topology::mstorage_init_keys(sort); },
 				[]() { return Topology::align(); },
 				[](const void* ptr) { return static_cast<const Topology*>(ptr)->storage(); },
 
-				[](void* ptr, std::size_t i, View v, std::size_t b) { return static_cast<Topology*>(ptr)->apply_field_write(i, View::view(v), b); },
-				[](void* ptr, std::size_t i, proc_opcode o, proc_param p, std::size_t b) { return static_cast<Topology*>(ptr)->apply_write(i, o, proc_param::view(p), b); },
+				[](void* ptr, std::size_t i, const View& v, std::size_t b) { return static_cast<Topology*>(ptr)->apply_field_write(i, View::view(v), b); },
+				[](void* ptr, std::size_t i, proc_opcode o, const proc_param& p, std::size_t b) { return static_cast<Topology*>(ptr)->apply_write(i, o, p, b); },
 
 				[](const void* ptr, std::size_t i) { return static_cast<const Topology*>(ptr)->field(i); },
 				[](void* ptr, std::size_t i) { return static_cast<Topology*>(ptr)->field(i); },
 				[](const void* ptr, std::size_t i) { return static_cast<const Topology*>(ptr)->sort_field(i); },
-				[](version_type v, View d) { return transcode(v, View::view(d)); },
+				[](version_type v, const View& d) { return transcode(v, View::view(d)); },
 
 				[](const void* ptr) { return static_cast<const Partition*>(ptr)->hash(); },
 				[](const void* ptr) { return static_cast<const Partition*>(ptr)->storage(); },
@@ -873,6 +1064,15 @@ namespace rdb
 				[](std::size_t idx) -> RuntimeInterfaceReflection::RTII& { return Topology::reflect(idx); },
 				[](std::size_t idx) -> RuntimeInterfaceReflection::RTII& { return Partition::reflect(idx); },
 				[](std::size_t idx) -> RuntimeInterfaceReflection::RTII& { return reflect_skey(idx); },
+
+				[](const void* ptr) -> std::string { return static_cast<const Topology*>(ptr)->print(); },
+				[](const void* ptr) -> std::string { return static_cast<const Partition*>(ptr)->print(); },
+				[]() -> std::string { return Topology::show(); },
+				[]() -> std::string { return Partition::show(); },
+
+				[](const View& a, const View& b) -> bool { return Topology::sort_keys_equal(a, b); },
+				[](const View& a, const View& b) -> bool { return Topology::sort_keys_order(a, b); },
+				[](const View& a, const View& b) -> int { return Topology::sort_keys_compare(a, b); },
 			});
 		}
 	};

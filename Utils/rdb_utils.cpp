@@ -24,7 +24,8 @@ namespace rdb
 		std::string uint128_t::to_string() const noexcept
 		{
 			std::stringstream out;
-			out << std::hex << std::setw(16) << std::setfill('0') << low
+			out << "0x"
+				<< std::hex << std::setw(16) << std::setfill('0') << low
 				<< std::hex << std::setw(16) << std::setfill('0') << high;
 			return out.str();
 		}
@@ -215,6 +216,20 @@ namespace rdb
 			for (decltype(auto) it : li)
 				state.update(&it, sizeof(it));
 			return state.digest();
+		}
+	}
+	namespace util
+	{
+		void spinlock_yield() noexcept
+		{
+			// Probably an overkill
+#			if defined(_MSC_VER)
+				_mm_pause();
+#			elif defined(__GNUG__)
+				__builtin_ia32_pause();
+#			else
+				std::this_thread::yield();
+#			endif
 		}
 	}
 }

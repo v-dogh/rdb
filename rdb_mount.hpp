@@ -85,7 +85,23 @@ namespace rdb
 			}
 			void wait() const noexcept
 			{
-				while (ref.load() != 0) ref.wait(ref.load());
+				// Optimize for short queries
+
+				for (int i = 0; i < 1000; ++i)
+				{
+					if (ref.load(std::memory_order::acquire) == 0)
+						return;
+					util::spinlock_yield();
+				}
+
+				// Optimize for longer queries
+
+				auto expected = ref.load(std::memory_order::acquire);
+				while (expected != 0)
+				{
+					ref.wait(expected, std::memory_order::acquire);
+					expected = ref.load(std::memory_order::acquire);
+				}
 			}
 			void acquire() noexcept
 			{
@@ -96,13 +112,42 @@ namespace rdb
 				if (--ref == 0) ref.notify_all();
 			}
 		};
+		struct QueryLogShard
+		{
+			std::size_t offset{ 0 };
+			std::size_t count{ 0 };
+			std::atomic<std::size_t> resolved{ 0 };
+			Mapper data{};
+		};
+		enum class QueryLogToken : unsigned char
+		{
+			Invalid,
+			Waiting,
+			Resolved,
+		};
+		using query_log_id = std::pair<std::size_t, std::size_t>;
 	private:
 		mutable std::mutex _mtx;
+		mutable std::shared_mutex _query_log_mtx;
 		mutable std::condition_variable _cv;
+
+		// Query logging
+
+		std::size_t _shard_id{ 0 };
+		std::unordered_map<
+			std::size_t,
+			QueryLogShard
+		> _log_shards{};
+
+		// Other stuff
 
 		std::vector<Thread> _threads{};
 		Config _cfg{};
 		Status _status{ Status::Stopped };
+
+		query_log_id _log_query(std::span<const unsigned char> packet) noexcept;
+		void _resolve_query(query_log_id id) noexcept;
+		void _replay_queries() noexcept;
 
 		std::size_t _vcpu(std::uint32_t key) const noexcept;
 		std::size_t _query_parse_operand(std::span<const unsigned char> packet, ParserState& state, ParserInfo info) noexcept;
@@ -131,8 +176,7 @@ namespace rdb
 		void start() noexcept;
 		void stop() noexcept;
 		void wait() noexcept;
-		void query_sync(std::span<const unsigned char> packet, QueryEngine::ReadChainStore::ptr store) noexcept;
-		std::future<void> query_async(std::span<const unsigned char> packet, QueryEngine::ReadChainStore::ptr store) noexcept;
+		bool query_sync(std::span<const unsigned char> packet, QueryEngine::ReadChainStore::ptr store) noexcept;
 
 		template<typename Func>
 		auto run(schema_type schema, Func&& task) noexcept

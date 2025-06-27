@@ -11,6 +11,16 @@ namespace rdb::type
 		public ScalarBase<Timestamp, std::chrono::system_clock::time_point::rep>,
 		public Interface<Timestamp, "tp64">
 	{
+	public:
+		enum class Round
+		{
+			Year,
+			Month,
+			Day,
+			Hour,
+			Minute
+		};
+	public:
 		static auto minline(std::span<unsigned char> view, const std::chrono::system_clock::time_point::rep& value) noexcept
 		{
 			return ScalarBase::minline(view, value);
@@ -20,6 +30,24 @@ namespace rdb::type
 			ScalarBase::minline(view,
 				std::chrono::system_clock::now().time_since_epoch().count()
 			);
+		}
+		static auto now() noexcept
+		{
+			return std::chrono::system_clock::now().time_since_epoch().count();
+		}
+		static auto now(Round rval, std::size_t to = 0) noexcept
+		{
+			using namespace std::chrono;
+			auto value = std::chrono::system_clock::now();
+			switch (rval)
+			{
+			case Round::Year: value = round<years>(value) + years(to);
+			case Round::Month: value = round<months>(value) + months(to);
+			case Round::Day: value = round<days>(value) + days(to);
+			case Round::Hour: value = round<hours>(value) + hours(to);
+			case Round::Minute: value = round<minutes>(value) + minutes(to);
+			}
+			return value.time_since_epoch().count();
 		}
 	};
 	class TimeUUID :

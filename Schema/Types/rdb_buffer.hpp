@@ -6,6 +6,7 @@
 #include <Types/rdb_tuple.hpp>
 #include <Types/rdb_scalar.hpp>
 #include <Types/rdb_array_iterator.hpp>
+#include <Types/rdb_trivial_helper.hpp>
 #include <sstream>
 #include <numeric>
 
@@ -20,10 +21,12 @@ namespace rdb::type
 	private:
 		static constexpr auto _is_dynamic = Type::uproperty.is(Type::uproperty.dynamic);
 		static constexpr auto _is_trivial = Type::uproperty.is(Type::uproperty.trivial);
+		using trivial_interface = impl::TrivialInterface<Type>;
 	public:
+		using trivial_type = typename trivial_interface::value_type;
 		using view_list = std::span<const TypedView<Type>>;
 		using list = std::initializer_list<TypedView<Type>>;
-		using trivial_list = std::span<const typename Type::value_type>;
+		using trivial_list = std::span<const trivial_type>;
 		using iterator = impl::ArrayIterator<Type, false, !_is_dynamic>;
 		using const_iterator = impl::ArrayIterator<Type, true, !_is_dynamic>;
 
@@ -41,12 +44,10 @@ namespace rdb::type
 			_is_trivial_string ||
 			std::is_same_v<Type, Byte>;
 		static constexpr auto _sbo_max =
-			(sizeof(std::uint64_t) * 2 - 1) / Type::static_storage();
+			(sizeof(std::uint64_t) * 2 - 1) / trivial_interface::storage;
 		static constexpr auto _volume_mask =
-			std::uint64_t(
-				byte::byteswap_for_storage<std::uint64_t>(
-					~std::uint64_t(0) << 1
-				)
+			byte::byteswap_for_storage<std::uint64_t>(
+				~std::uint64_t(0) >> 1
 			);
 		static constexpr auto _sbo_tag =
 			std::uint8_t(0b00000001);
@@ -224,10 +225,10 @@ namespace rdb::type
 			return s;
 		}
 
-		static auto minline(std::span<unsigned char> view, const std::basic_string<typename Type::value_type>& str) noexcept
+		static auto minline(std::span<unsigned char> view, const std::basic_string<trivial_type>& str) noexcept
 			requires _is_string
 		{
-			return minline(view, std::basic_string_view<typename Type::value_type>(str));
+			return minline(view, std::basic_string_view<trivial_type>(str));
 		}
 
 		static auto mstorage(view_list cpy) noexcept
@@ -235,9 +236,14 @@ namespace rdb::type
 			std::size_t size = 0;
 			if constexpr (_is_dynamic)
 			{
-				size = std::accumulate(cpy.begin(), cpy.end(), std::size_t{ 0 }, [](const auto& value, std::size_t ctr) {
-					return ctr + value->storage();
-				});
+				size = std::accumulate(
+					cpy.begin(),
+					cpy.end(),
+					std::size_t{ 0 },
+					[](std::size_t ctr, const auto& value) {
+						return ctr + value->storage();
+					}
+				);
 			}
 			else
 			{
@@ -272,22 +278,22 @@ namespace rdb::type
 			}
 		}
 
-		static auto mstorage(const std::basic_string<typename Type::value_type>& value)
+		static auto mstorage(const std::basic_string<trivial_type>& value)
 			requires _is_string
 		{
 			return mstorage(Reserve(value.size()));
 		}
-		static auto mstorage(std::basic_string_view<typename Type::value_type> value)
+		static auto mstorage(std::basic_string_view<trivial_type> value)
 			requires _is_string
 		{
 			return mstorage(Reserve(value.size()));
 		}
-		static auto mstorage(const typename Type::value_type* ptr)
+		static auto mstorage(const trivial_type* ptr)
 			requires _is_string
 		{
 			return mstorage(
 				std::basic_string_view<
-					typename Type::value_type
+					trivial_type
 				>(ptr)
 			);
 		}
@@ -296,7 +302,7 @@ namespace rdb::type
 		{
 			return mstorage(
 				std::basic_string_view<
-					typename Type::value_type
+					trivial_type
 				>(str.begin(), str.end())
 			);
 		}
@@ -342,8 +348,8 @@ namespace rdb::type
 				!std::is_same_v<std::decay_t<Arg>, Reserve> &&
 				!std::is_same_v<std::decay_t<Arg>, list> &&
 				!std::is_same_v<std::decay_t<Arg>, view_list> &&
-				!std::is_same_v<std::decay_t<Arg>, const typename Type::value_type*> &&
-				!std::is_same_v<std::decay_t<Arg>, std::basic_string_view<typename Type::value_type>>,
+				!std::is_same_v<std::decay_t<Arg>, const trivial_type*> &&
+				!std::is_same_v<std::decay_t<Arg>, std::basic_string_view<trivial_type>>,
 				!std::is_same_v<std::decay_t<Arg>, trivial_list>
 			)
 		{
@@ -384,18 +390,18 @@ namespace rdb::type
 		{
 			_set_dims(res.size, res.size * Type::mstorage());
 		}
-		explicit BufferBase(typename Type::value_type* ptr)
+		explicit BufferBase(trivial_type* ptr)
 			requires _is_string : BufferBase(
-				std::basic_string_view<typename Type::value_type>(ptr)
+				std::basic_string_view<trivial_type>(ptr)
 			) {}
-		explicit BufferBase(std::basic_string_view<typename Type::value_type> str)
+		explicit BufferBase(std::basic_string_view<trivial_type> str)
 			requires _is_string
 		{
 			_set_dims(str.size(), str.size() * Type::static_storage());
 			std::memcpy(
 				_buffer(),
 				str.data(),
-				str.size() * sizeof(typename Type::value_type)
+				str.size() * sizeof(trivial_type)
 			);
 		}
 		explicit BufferBase(trivial_list str)
@@ -405,61 +411,44 @@ namespace rdb::type
 			std::memcpy(
 				_buffer(),
 				str.data(),
-				str.size() * sizeof(typename Type::value_type)
+				str.size() * sizeof(trivial_type)
 			);
 		}
 
-		enum rOp : proc_opcode
+		struct Op : InterfaceDeclProcPrimary<
+			DeclWrite<
+				Tuple<Uint64, BufferBase>,
+				Tuple<Uint64, Type>,
+				Tuple<Uint64, BufferBase>
+			>,
+			DeclFilter<
+				BufferBase, BufferBase, BufferBase
+			>,
+			DeclRead<
+				ReadPair<Tuple<Uint64, Uint64>, BufferBase>,
+				ReadPair<Uint64, Type>,
+				ReadPair<void, Uint64>
+			>
+		>
 		{
-			Range = 'R',
-			Read = 'r'
-		};
-		enum wOp : proc_opcode
-		{
-			// [ Offset, Values ]
-			Insert = 'i',
-			// [ Offset, Value ]
-			Write = 'w',
-			// [ Offset Values ]
-			Overwrite = 'O'
-		};
-		enum fOp : proc_opcode
-		{
-			Smaller = proc_opcode(SortFilterOp::Smaller),
-			Larger = proc_opcode(SortFilterOp::Larger),
-			Equal = proc_opcode(SortFilterOp::Equal),
-		};
-
-		template<rOp Op> struct ReadPair { };
-		template<> struct ReadPair<rOp::Range>
-		{
-			using param = Tuple<Uint64, Uint64>;
-			using result = BufferBase;
-		};
-		template<> struct ReadPair<rOp::Read>
-		{
-			using param = Uint64;
-			using result = Type;
-		};
-
-		template<wOp Op> struct WritePair { };
-		template<> struct WritePair<wOp::Insert>
-		{
-			using param = Tuple<Uint64, BufferBase>;
-		};
-		template<> struct WritePair<wOp::Write>
-		{
-			using param = Tuple<Uint64, Type>;
-		};
-		template<> struct WritePair<wOp::Overwrite>
-		{
-			using param = Tuple<Uint64, BufferBase>;
-		};
-
-		template<fOp Op>
-		struct FilterPair
-		{
-			using param = BufferBase;
+			enum w : proc_opcode
+			{
+				Insert,
+				Write,
+				Overwrite
+			};
+			enum r : proc_opcode
+			{
+				Range,
+				Read,
+				Size
+			};
+			enum f : proc_opcode
+			{
+				Smaller = proc_opcode(SortFilterOp::Smaller),
+				Larger = proc_opcode(SortFilterOp::Larger),
+				Equal = proc_opcode(SortFilterOp::Equal),
+			};
 		};
 
 		std::size_t size() const noexcept
@@ -476,7 +465,7 @@ namespace rdb::type
 			return *_at_impl(idx);
 		}
 
-		typename Type::value_type* data() noexcept
+		trivial_type* data() noexcept
 			requires _is_trivial
 		{
 			return _buffer();
@@ -547,7 +536,7 @@ namespace rdb::type
 			if constexpr (_is_trivial_string)
 			{
 				return std::format("'{}'",
-					std::basic_string_view<typename Type::value_type>(
+					std::basic_string_view<trivial_type>(
 						_buffer()->underlying(), _size() + 1
 					)
 				);
@@ -580,15 +569,15 @@ namespace rdb::type
 			}
 		}
 
-		wproc_query_result wproc(proc_opcode opcode, proc_param arguments, wproc_query query) noexcept
+		wproc_query_result wproc(proc_opcode opcode, const proc_param& arguments, wproc_query query) noexcept
 		{
 
 		}
-		rproc_result rproc(proc_opcode opcode, proc_param) const noexcept
+		rproc_result rproc(proc_opcode opcode, const proc_param&) const noexcept
 		{
 
 		}
-		bool fproc(proc_opcode opcode, proc_param arguments) const noexcept
+		bool fproc(proc_opcode opcode, const proc_param& arguments) const noexcept
 		{
 			TypedView<BufferBase> other = TypedView<BufferBase>::view(
 				arguments.data()
@@ -614,13 +603,13 @@ namespace rdb::type
 					if (i2 == e2)
 						result = std::strong_ordering::equal;
 
-				if (opcode == fOp::Smaller) return result == std::strong_ordering::less;
-				else if (opcode == fOp::Larger) return result == std::strong_ordering::greater;
-				else if (opcode == fOp::Equal) return result == std::strong_ordering::equal;
+				if (opcode == Op::Smaller) return result == std::strong_ordering::less;
+				else if (opcode == Op::Larger) return result == std::strong_ordering::greater;
+				else if (opcode == Op::Equal) return result == std::strong_ordering::equal;
 			}
 			else
 			{
-				if (opcode == fOp::Equal)
+				if (opcode == Op::Equal)
 				{
 					auto it1 = begin();
 					auto end1 = end();
@@ -664,8 +653,8 @@ namespace rdb::type
 							it2->view()
 						);
 
-					if (opcode == fOp::Smaller) return !is_larger;
-					else if (opcode == fOp::Larger) return is_larger;
+					if (opcode == Op::Smaller) return !is_larger;
+					else if (opcode == Op::Larger) return is_larger;
 				}
 			}
 			return true;

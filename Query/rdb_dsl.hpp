@@ -55,8 +55,81 @@ namespace rdb
 {
 	enum class Policy
 	{
-		Sync,
-		Async
+		Async = 1 << 0,
+		Atomic = 1 << 1,
+	};
+
+	template<typename Schema>
+	class TableListIterator
+	{
+	public:
+		using value_type = const Schema::topology;
+		using pointer = value_type::value;
+		using reference = value_type&;
+		using difference_type = std::ptrdiff_t;
+		using iterator_category = std::forward_iterator_tag;
+	private:
+		pointer _data{ nullptr };
+		std::size_t _idx{ 0 };
+		std::size_t _len{ 0 };
+
+		void _move() noexcept
+		{
+			_idx += _len;
+			if (_idx < _data.size())
+				_len = _data.subview(_idx)->storage();
+			else
+				_len = 0;
+		}
+		pointer _cur() const noexcept
+		{
+			return _data.subview(_idx, _len);
+		}
+	public:
+		explicit TableListIterator(const pointer& data, bool end)
+			: _data(View::view(data.data()))
+		{
+			if (end)
+				_idx = data.size();
+			else if (data.size())
+				_len = _data->storage();
+		}
+
+		reference operator*() const noexcept { return *_cur(); }
+		pointer operator->() const noexcept { return _cur(); }
+
+		TableListIterator& operator++() noexcept { _move(); return *this; }
+		TableListIterator operator++(int) noexcept { TableListIterator tmp = *this; ++(*this); return tmp; }
+
+		bool operator==(const TableListIterator& other) const noexcept { return _idx == other._idx; }
+		bool operator!=(const TableListIterator& other) const noexcept { return _idx != other._idx; }
+		bool operator<(const TableListIterator& other) const noexcept { return _idx < other._idx; }
+		bool operator<=(const TableListIterator& other) const noexcept { return _idx <= other._idx; }
+		bool operator>(const TableListIterator& other) const noexcept { return _idx > other._idx; }
+		bool operator>=(const TableListIterator& other) const noexcept { return _idx >= other._idx; }
+	};
+
+	template<typename Schema>
+	class TableList
+	{
+	public:
+		using iterator = TableListIterator<Schema>;
+	private:
+		Schema::value _data{ nullptr };
+	public:
+		void push(std::span<const unsigned char> data) noexcept
+		{
+			_data = Schema::value::copy(data);
+		}
+
+		auto begin() const noexcept
+		{
+			return iterator(_data, false);
+		}
+		auto end() const noexcept
+		{
+			return iterator(_data, true);
+		}
 	};
 
 	namespace cmd
@@ -64,6 +137,7 @@ namespace rdb
 		struct EvalTrait {};
 		struct PredicateTrait {};
 		struct FetchTrait {};
+		struct ExecuteTrait {};
 	}
 	namespace impl
 	{
@@ -190,6 +264,48 @@ namespace rdb
 		};
 
 		template<typename Schema>
+		struct Page : EvalTrait
+		{
+			using schema = Schema;
+			Schema::partition::value key{};
+			TableList<Schema>* out{ nullptr };
+			std::size_t count{ 0 };
+
+			constexpr auto extract()
+			{
+				return [out = out](std::size_t op, std::span<const unsigned char> buffer) {
+					out->push(buffer);
+				};
+			}
+
+			template<typename>
+			constexpr auto size() const noexcept
+			{
+				return
+					sizeof(qOp) +
+					sizeof(schema_type) +
+					key.size() +
+					sizeof(std::uint32_t);
+			}
+			template<typename>
+			constexpr auto fill(std::span<unsigned char> buffer) noexcept
+			{
+				buffer[0] = char(qOp::Page);
+				std::size_t off = sizeof(qOp);
+				off += byte::swrite<schema_type>(buffer, off, Schema::ucode);
+				off += byte::swrite(buffer, off, key.data());
+				off += byte::swrite(buffer, off, count);
+				return off;
+			}
+			template<typename>
+			constexpr auto eval(std::span<const unsigned char> buffer) const noexcept
+			{
+				out->push(buffer);
+				return 1;
+			}
+		};
+
+		template<typename Schema>
 		struct Create : impl::ExtractNothing
 		{
 			using schema = Schema;
@@ -308,7 +424,7 @@ namespace rdb
 			template<typename Schema>
 			constexpr auto size() const noexcept
 			{
-				static_assert(!Schema::data::template has<Field>, "Cannot write to a key field");
+				static_assert(Schema::data::template has<Field>, "Cannot write to a key field");
 				return
 					sizeof(qOp) +
 					sizeof(std::uint8_t) +
@@ -330,13 +446,13 @@ namespace rdb
 					}, data)
 				);
 				buffer[off++] = static_cast<std::uint8_t>(Schema::template index_of<Field>());
-				off += byte::swrite(buffer, off,
-					std::apply([](auto&&... args) {
-						return Schema::template interface<Field>::make(
+				off +=
+					std::apply([&](auto&&... args) {
+						return Schema::template interface<Field>::minline(
+							buffer.subspan(off),
 							std::forward<Argv>(args)...
 						);
-					}, data)
-				);
+					}, data);
 				return off;
 			}
 		};
@@ -350,7 +466,7 @@ namespace rdb
 			template<typename Schema>
 			constexpr auto size() const noexcept
 			{
-				static_assert(!Schema::data::template has<Field>, "Cannot write to a key field");
+				static_assert(Schema::data::template has<Field>, "Cannot write to a key field");
 				return
 					sizeof(qOp) +
 					sizeof(std::uint8_t) +
@@ -378,7 +494,7 @@ namespace rdb
 			template<typename Schema>
 			constexpr auto size() const noexcept
 			{
-				static_assert(!Schema::data::template has<Field>, "Cannot write to a key field");
+				static_assert(Schema::data::template has<Field>, "Cannot write to a key field");
 				return
 					sizeof(qOp) +
 					sizeof(std::uint8_t) +
@@ -419,7 +535,7 @@ namespace rdb
 			template<typename Schema>
 			constexpr auto size() const noexcept
 			{
-				static_assert(!Schema::data::template has<Field>, "Cannot write to a key field");
+				static_assert(Schema::data::template has<Field>, "Cannot write to a key field");
 				return
 					sizeof(qOp) +
 					sizeof(std::uint8_t) +
@@ -500,11 +616,18 @@ namespace rdb
 
 		// Commands
 
-		template<Policy Ex>
-		struct Execute {};
+		template<unsigned char... Flags>
+		struct Execute : ExecuteTrait
+		{
+			static constexpr auto flags = (Flags | ... | 0x00);
+			bool* status{ nullptr };
 
-		template<bool Is>
-		struct Atomic {};
+			void resolve(bool value) const noexcept
+			{
+				if (status)
+					*status = value;
+			}
+		};
 
 		struct Flush {};
 	}
@@ -514,33 +637,34 @@ namespace rdb
 		constexpr cmd::compound_key keyset(Argv&&... keys) noexcept
 		{
 			std::tuple args = std::forward_as_tuple(std::forward<Argv>(keys)...);
-			cmd::compound_key result;
 			return {
 				[&args]<std::size_t... Idv>(std::index_sequence<Idv...>)
 				{
-					return std::tuple_element_t<1, cmd::compound_key>::combine_views(
-						[&]() {
-							if constexpr (
-								cmd::is_typed_view<
-									std::decay_t<
-										std::tuple_element_t<Idv, std::decay_t<decltype(args)>>
-									>
-								>::value
-							)
-							{
-								return std::get<Idv>(args);
-							}
-							else
-							{
-								return Schema::partition::make(
-									std::get<Idv>(args)
-								);
-							}
-						}()...
+					// return std::tuple_element_t<1, cmd::compound_key>::combine_views(
+					// 	[&]() {
+					// 		if constexpr (
+					// 			cmd::is_typed_view<
+					// 				std::decay_t<
+					// 					std::tuple_element_t<Idv, std::decay_t<decltype(args)>>
+					// 				>
+					// 			>::value
+					// 		)
+					// 		{
+					// 			return std::get<Idv>(args);
+					// 		}
+					// 		else
+					// 		{
+					// 			return Schema::partition::make(
+					// 				std::get<Idv>(args)
+					// 			);
+					// 		}
+					// 	}()...
+					// );
+					return Schema::partition::make(
+						std::get<Idv>(args)...
 					);
 				}(std::make_index_sequence<Schema::partition::fields>()),
-				[&args]
-					<std::size_t... Idv>(std::index_sequence<Idv...>)
+				[&args]<std::size_t... Idv>(std::index_sequence<Idv...>)
 				{
 					if constexpr (sizeof...(Idv) == 0)
 					{
@@ -631,11 +755,14 @@ namespace rdb
 
 	constexpr auto flush = cmd::Flush();
 
-	template<Policy Ex = Policy::Sync>
-	constexpr auto execute = cmd::Execute<Ex>();
+	template<auto... Opts>
+	constexpr auto execute = cmd::Execute<static_cast<unsigned char>(Opts)...>();
 
-	template<bool Is>
-	constexpr auto atomic = cmd::Atomic<Is>();
+	template<auto... Opts>
+	constexpr auto execute_checked(bool* out = nullptr) noexcept
+	{
+		return cmd::Execute<static_cast<unsigned char>(Opts)...>(out);
+	}
 
 	// Operands
 
@@ -656,20 +783,47 @@ namespace rdb
 	}
 
 	template<typename Schema, typename... Argv>
+	constexpr auto page(TableList<Schema>* out, std::size_t count, Argv&&... args) noexcept
+	{
+		return cmd::Page<Schema>{
+			.key = Schema::partition::make(std::forward<Argv>(args)...),
+			.out = out,
+			.count = count
+		};
+	}
+
+	template<typename Schema, typename... Argv>
 	constexpr auto create(Argv&&... args) noexcept
 	{
 		std::tuple targs = std::forward_as_tuple(std::forward<Argv>(args)...);
 		cmd::compound_key result{
 			[&targs]<std::size_t... Idv>(std::index_sequence<Idv...>)
 			{
-				return std::tuple_element_t<1, cmd::compound_key>::combine_views(
-					Schema::partition::make(
-						std::get<Idv>(targs)
-					)...
+				// return std::tuple_element_t<1, cmd::compound_key>::combine_views(
+				// 	[&]() {
+				// 		if constexpr (
+				// 			cmd::is_typed_view<
+				// 				std::decay_t<
+				// 					std::tuple_element_t<Idv, std::decay_t<decltype(targs)>>
+				// 				>
+				// 			>::value
+				// 		)
+				// 		{
+				// 			return std::get<Idv>(targs);
+				// 		}
+				// 		else
+				// 		{
+				// 			return Schema::partition::make(
+				// 				std::get<Idv>(targs)...
+				// 			);
+				// 		}
+				// 	}()...
+				// );
+				return Schema::partition::make(
+					std::get<Idv>(targs)...
 				);
 			}(std::make_index_sequence<Schema::partition::fields>()),
-			[&targs]
-				<std::size_t... Idv>(std::index_sequence<Idv...>)
+			[&targs]<std::size_t... Idv>(std::index_sequence<Idv...>)
 			{
 				if constexpr (sizeof...(Idv) == 0)
 				{
@@ -823,9 +977,9 @@ namespace rdb
 			std::pmr::vector<func_type> handlers{ &handler_resource };
 		};
 	private:
-		static void _sync(std::future<void> fut = {}) noexcept
+		static void _sync(std::future<bool> fut = {}) noexcept
 		{
-			thread_local std::future<void> task{};
+			thread_local std::future<bool> task{};
 			if (fut.valid())
 				task = std::move(fut);
 			else if (task.valid())
@@ -888,22 +1042,40 @@ namespace rdb
 				_qbuffer(0);
 				return *this;
 			}
-			else if constexpr (std::is_same_v<std::remove_cvref_t<Type>, cmd::Execute<Policy::Sync>>)
+			else if constexpr (std::is_base_of_v<cmd::ExecuteTrait, std::remove_cvref_t<Type>>)
 			{
-				static_cast<Base*>(this)->query_sync(
-					_qbuffer(~0ull), _build_store(nullptr)
-				);
-				_qbuffer(0);
-				return *this;
-			}
-			else if constexpr (std::is_same_v<std::remove_cvref_t<Type>, cmd::Execute<Policy::Async>>)
-			{
-				auto f = static_cast<Base*>(this)->query_async(
-					_qbuffer(~0ull), _build_store(nullptr)
-				);
-				_qbuffer(0);
-				_sync(f);
-				return f;
+				constexpr auto flags = std::remove_cvref_t<Type>::flags;
+				if constexpr (flags & unsigned(Policy::Async))
+				{
+					// auto f = static_cast<Base*>(this)->query_async(
+					// 	_qbuffer(~0ull), _build_store(nullptr)
+					// );
+					// _qbuffer(0);
+					// _sync(f);
+					// return f;
+				}
+				else
+				{
+					if constexpr (flags & unsigned (Policy::Atomic))
+					{
+						const auto qid = static_cast<Base*>(this)->_log_query(_qbuffer(~0ull));
+						const auto result = static_cast<Base*>(this)->query_sync(
+							_qbuffer(~0ull), _build_store(nullptr)
+						);
+						_qbuffer(0);
+						if (result)
+							static_cast<Base*>(this)->_resolve_query(qid);
+						cmd.resolve(result);
+					}
+					else
+					{
+						cmd.resolve(static_cast<Base*>(this)->query_sync(
+							_qbuffer(~0ull), _build_store(nullptr)
+						));
+						_qbuffer(0);
+					}
+					return *this;
+				}
 			}
 			else
 			{

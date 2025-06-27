@@ -1,6 +1,7 @@
 #include <rdb_dbg.hpp>
 #include <rdb_mount.hpp>
 #include <rdb_reflect.hpp>
+#include <rdb_locale.hpp>
 #include <limits>
 #include <format>
 #ifdef __unix__
@@ -26,6 +27,8 @@ namespace rdb
 			return;
 
 		std::filesystem::create_directory(_cfg.root);
+		if (!std::filesystem::exists(_cfg.root/"ntns"))
+			std::filesystem::create_directory(_cfg.root/"ntns");
 
 		_threads.resize(_cfg.mnt.cores);
 		for (std::size_t i = 0; i < _cfg.mnt.cores; i++)
@@ -120,12 +123,118 @@ namespace rdb
 		});
 	}
 
+	Mount::query_log_id Mount::_log_query(std::span<const unsigned char> packet) noexcept
+	{
+		std::lock_guard lock(_query_log_mtx);
+		const auto req_size = packet.size() + sizeof(std::uint32_t) + 1;
+		auto f = _log_shards.find(_shard_id);
+		if (f == _log_shards.end())
+		{
+			const auto [ it, _ ] = _log_shards.try_emplace(_shard_id);
+			f = it;
+			f->second.data.map(_cfg.root/"ntns"/"s0");
+			f->second.data.reserve(_cfg.logs.log_shard_size);
+		}
+		else if (f->second.offset + req_size > f->second.data.size())
+		{
+			const auto [ it, _ ] = _log_shards.try_emplace(++_shard_id);
+			f = it;
+			it->second.data.map(_cfg.root/"ntns"/std::format("s{}", _shard_id));
+			it->second.data.reserve(_cfg.logs.log_shard_size);
+		}
+		auto& shard = f->second;
+		const auto off = shard.offset;
+		shard.data.memory()[shard.offset++]
+			= char(QueryLogToken::Waiting);
+		shard.offset += byte::swrite(
+			shard.data.memory(),
+			shard.offset,
+			std::uint32_t(packet.size())
+		);
+		shard.offset += byte::swrite(
+			shard.data.memory(),
+			shard.offset,
+			packet
+		);
+		return std::make_pair(_shard_id, off);
+	}
+	void Mount::_resolve_query(query_log_id id) noexcept
+	{
+		std::shared_lock lock(_query_log_mtx);
+		auto& shard = _log_shards[id.first];
+		shard.data.memory()[id.second]
+			= char(QueryLogToken::Resolved);
+
+		const auto value = shard.resolved.fetch_add(1, std::memory_order::relaxed) + 1;
+		if (_shard_id - 1 != id.first &&
+			value == shard.count)
+		{
+			shard.data.remove();
+			if (_log_shards.size() > 12)
+			{
+				shard.data.close();
+				lock.unlock();
+				std::lock_guard lock(_query_log_mtx);
+				for (auto it = _log_shards.begin(); it != _log_shards.end();)
+				{
+					auto cur = it++;
+					if (cur->second.resolved == cur->second.count)
+						_log_shards.erase(cur);
+				}
+				_log_shards.rehash(_log_shards.size());
+			}
+		}
+	}
+	void Mount::_replay_queries() noexcept
+	{
+		std::vector<std::size_t> shards;
+		for (decltype(auto) it : std::filesystem::directory_iterator(_cfg.root/"ntns"))
+		{
+			shards.push_back(
+				std::stoi(it
+					.path()
+					.filename()
+					.string()
+					.substr(1))
+			);
+			auto& shard = _log_shards[shards.back()];
+			shard.data.open(it);
+		}
+		std::sort(shards.begin(), shards.end());
+		for (decltype(auto) it : shards)
+		{
+			auto& shard = _log_shards[it];
+			while (shard.data.memory()[shard.offset] !=
+				   char(QueryLogToken::Invalid))
+			{
+				const auto type_offset = shard.offset;
+				const auto type = QueryLogToken(shard.data.memory()[shard.offset++]);
+				const auto size = byte::sread<std::uint32_t>(shard.data.memory(), shard.offset);
+				const auto packet = std::span(
+					shard.data.memory().subspan(shard.offset, size)
+				);
+				shard.offset += size;
+				if (type == QueryLogToken::Resolved)
+				{
+					shard.resolved++;
+				}
+				else if (query_sync(packet, nullptr))
+				{
+					_resolve_query(query_log_id{ it, type_offset });
+				}
+				shard.count++;
+			}
+		}
+		if (!shards.empty())
+			_shard_id = shards.back();
+	}
+
 	std::size_t Mount::_vcpu(std::uint32_t key) const noexcept
 	{
 		return key % _cfg.mnt.cores;
 	}
 
-	void Mount::query_sync(std::span<const unsigned char> packet, QueryEngine::ReadChainStore::ptr store) noexcept
+	bool Mount::query_sync(std::span<const unsigned char> packet, QueryEngine::ReadChainStore::ptr store) noexcept
 	{
 		thread_local std::aligned_storage_t<32, alignof(ParserState::fragment)> pool;
 		std::pmr::monotonic_buffer_resource resource(&pool, sizeof(pool));
@@ -133,7 +242,7 @@ namespace rdb
 		ParserInfo inf{};
 
 		std::size_t off = 0;
-		while (packet.size() - off >= 2)
+		while (packet.size() >= off + 2)
 		{
 			const auto flags = packet[off++];
 			if (flags & QueryEngine::OperandFlags::Reads)
@@ -151,13 +260,11 @@ namespace rdb
 			{
 				state.store->handlers[
 					it.first.operand_idx - 1
-				](it.first.operator_idx - 1, it.second);
+				](it.first.operator_idx, it.second);
 			}
 		}
-	}
-	std::future<void> Mount::query_async(std::span<const unsigned char> packet, QueryEngine::ReadChainStore::ptr store) noexcept
-	{
-		return std::future<void>();
+
+		return true;
 	}
 
 	std::size_t Mount::_query_parse_operand(std::span<const unsigned char> packet, ParserState& state, ParserInfo inf) noexcept
@@ -168,12 +275,15 @@ namespace rdb
 		// Extract keys
 
 		if (packet.size() < sizeof(cmd::qOp) + sizeof(key_type) + sizeof(schema_type))
-			return packet.size() - off;
+			return packet.size();
 
 		const auto schema = byte::sread<schema_type>(packet.data(), off);
 		const auto* info = RuntimeSchemaReflection::fetch(schema);
 		if (info == nullptr)
-			return packet.size() - off;
+		{
+			RDB_WARN("Unrecognized schema passed to query parser")
+			return packet.size();
+		}
 
 		key_type key = 0x00;
 		View pkey = nullptr;
@@ -187,8 +297,11 @@ namespace rdb
 			off += size;
 			key = info->hash_partition(pkey.data().data());
 		}
+
 		// Get sort keys
-		if (info->skeys())
+		if (info->skeys() &&
+			op == cmd::qOp::Fetch || op == cmd::qOp::Check ||
+			op == cmd::qOp::Remove)
 		{
 			std::size_t size = 0;
 			for (std::size_t i = 0; i < info->skeys(); i++)
@@ -203,56 +316,60 @@ namespace rdb
 			off += size;
 		}
 
-		if (op == cmd::qOp::Fetch)
+		if (op == cmd::qOp::Fetch ||
+			op == cmd::qOp::Check)
 		{
-			std::size_t coff = 0;
-			while ((coff = _query_parse_schema_operator(
-					packet.subspan(off),
-					key, pkey, sort,
-					schema,
-					state,
-					inf
-				)) != ~0ull)
+			if (op == cmd::qOp::Fetch)
 			{
-				off += coff;
-				if (off >= packet.size())
-					break;
+				std::size_t coff = 0;
+				while ((coff = _query_parse_schema_operator(
+						packet.subspan(off),
+						key, pkey, sort,
+						schema,
+						state,
+						inf
+					)) != ~0ull)
+				{
+					off += coff;
+					if (off >= packet.size())
+						break;
+				}
 			}
-		}
-		else if (op == cmd::qOp::Check)
-		{
-			std::size_t coff = 0;
-			while ((coff = _query_parse_predicate_operator(
-					packet.subspan(off),
-					key, pkey, sort,
-					schema,
-					state,
-					inf
-				)) != ~0ull)
+			else if (op == cmd::qOp::Check)
 			{
-				off += coff;
-				if (off >= packet.size())
-					break;
+				std::size_t coff = 0;
+				while ((coff = _query_parse_predicate_operator(
+						packet.subspan(off),
+						key, pkey, sort,
+						schema,
+						state,
+						inf
+					)) != ~0ull)
+				{
+					off += coff;
+					if (off >= packet.size())
+						break;
+				}
 			}
 		}
 		else if (op == cmd::qOp::Create ||
 				 op == cmd::qOp::Remove)
 		{
-			View data = nullptr;
-			{
-				data = View::view(
-					packet.subspan(
-						off,
-						info->storage(packet.data() + off)
-					)
-				);
-				off += data.size();
-			}
-
 			auto& core = _threads[_vcpu(key)];
 
 			if (op == cmd::qOp::Create)
 			{
+				View data = nullptr;
+				{
+					data = View::view(
+						packet.subspan(
+							off,
+							info->storage(packet.data() + off)
+						)
+					);
+					off += data.size();
+				}
+
 				state.acquire();
 				core.launch(Thread::task(schema, [=, &state, this](MemoryCache* cache) {
 					cache->write(
@@ -271,6 +388,19 @@ namespace rdb
 					state.release();
 				}));
 			}
+		}
+		else if (op == cmd::qOp::Page)
+		{
+			auto& core = _threads[_vcpu(key)];
+			const auto count = byte::sread<std::uint32_t>(packet, off);
+			state.acquire();
+			core.launch(Thread::task(schema, [=, &state, this](MemoryCache* cache) {
+				state.push(cache->page(key, count), ParserInfo{
+					.operand_idx = inf.operand_idx,
+					.operator_idx = 0
+				});
+				state.release();
+			}));
 		}
 		return off;
 	}
@@ -311,12 +441,13 @@ namespace rdb
 			off--;
 			do
 			{
-				const auto field = packet[++off];
+				off++;
+				const auto field = packet[off++];
 				fields.set(field);
-				field_operator_map[field] = ++info.operator_idx;
+				field_operator_map[field] = info.operator_idx++;
 			} while (
-				off + 1 < packet.size() &&
-				packet[off + 1] == char(cmd::qOp::Read)
+				off < packet.size() &&
+				packet[off] == char(cmd::qOp::Read)
 			);
 
 			state.acquire();
@@ -354,6 +485,10 @@ namespace rdb
 		{
 
 		}
+		else
+		{
+			return ~0ull;
+		}
 		return off;
 	}
 	std::size_t Mount::_query_parse_predicate_operator(std::span<const unsigned char> packet, key_type key, View partition, View sort, schema_type schema, ParserState& state, ParserInfo& info) noexcept
@@ -363,7 +498,7 @@ namespace rdb
 		std::size_t off = sizeof(cmd::qOp);
 		if (op == cmd::qOp::FilterExists)
 		{
-			const auto op_idx = ++info.operator_idx;
+			const auto op_idx = info.operator_idx++;
 			state.acquire();
 			core.launch(Thread::task(schema, [=, &state, this](MemoryCache* cache) {
 				const auto result = cache->exists(key, sort);
@@ -375,6 +510,10 @@ namespace rdb
 				});
 				state.release();
 			}));
+		}
+		else
+		{
+			return ~0ull;
 		}
 		return off;
 	}

@@ -174,38 +174,26 @@ namespace rdb::type
 			}(), ...);
 		}
 
-		enum rOp : proc_opcode
+		struct Op : InterfaceDeclProcPrimary<
+			DeclWrite<Ts...>,
+			DeclFilter<Tuple, Tuple, Tuple>,
+			DeclRead<ReadPair<void, Ts>...>
+		>
 		{
-			// Get + N is equivalent to a read of tuple.field<N>()
-			Get = 0
-		};
-		enum wOp : proc_opcode
-		{
-			// Set + N is equivalent to a write to tuple.field<N>()
-			Set = 0
-		};
-		enum fOp : proc_opcode
-		{
-			Smaller = proc_opcode(SortFilterOp::Smaller),
-			Larger = proc_opcode(SortFilterOp::Larger),
-			Equal = proc_opcode(SortFilterOp::Equal),
-		};
-
-		template<rOp Op>
-		struct ReadPair
-		{
-			using param = void;
-			using result = TypeAt<std::size_t(Op)>;
-		};
-		template<wOp Op>
-		struct WritePair
-		{
-			using param = TypeAt<std::size_t(Op)>;
-		};
-		template<fOp Op>
-		struct FilterPair
-		{
-			using param = Tuple;
+			enum w : proc_opcode
+			{
+				Set
+			};
+			enum r : proc_opcode
+			{
+				Get
+			};
+			enum f : proc_opcode
+			{
+				Smaller = proc_opcode(SortFilterOp::Smaller),
+				Larger = proc_opcode(SortFilterOp::Larger),
+				Equal = proc_opcode(SortFilterOp::Equal),
+			};
 		};
 
 		key_type hash() const noexcept
@@ -291,18 +279,18 @@ namespace rdb::type
 			return out.str();
 		}
 
-		wproc_query_result wproc(proc_opcode opcode, proc_param arguments, wproc_query query) noexcept
+		wproc_query_result wproc(proc_opcode opcode, const proc_param& arguments, wproc_query query) noexcept
 		{
 
 		}
-		rproc_result rproc(proc_opcode opcode, proc_param) const noexcept
+		rproc_result rproc(proc_opcode opcode, const proc_param& arguments) const noexcept
 		{
-			if (opcode > rOp::Get)
+			if (opcode > Op::Get)
 			{
-				return field(opcode - rOp::Get);
+				return field(opcode - Op::Get);
 			}
 		}
-		bool fproc(proc_opcode opcode, proc_param arguments) const noexcept
+		bool fproc(proc_opcode opcode, const proc_param& arguments) const noexcept
 		{
 
 		}

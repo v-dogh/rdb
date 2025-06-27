@@ -60,25 +60,18 @@ namespace rdb::type
 		explicit Nullable() = default;
 		explicit Nullable(Null) : _null(true) {}
 
-		using rOp = Type::rOp;
-		using wOp = Type::wOp;
-		using fOp = Type::fOp;
-
-		template<wOp Op>
-		struct WritePair
+		struct Op : InterfaceDeclProc<Type,
+			DeclWrite<>,
+			DeclFilter<void>,
+			DeclRead<>
+		>
 		{
-			using param = Type::template WritePair<Op>::param;
-		};
-		template<fOp Op>
-		struct ReadPair
-		{
-			using param = Type::template ReadPair<Op>::param;
-			using result = Type::template ReadPair<Op>::result;
-		};
-		template<fOp Op>
-		struct FilterPair
-		{
-			using param = Type::template FilterPair<Op>::param;
+			enum w : proc_opcode {};
+			enum r : proc_opcode {};
+			enum f : proc_opcode
+			{
+				IsNull = Op::wbase
+			};
 		};
 
 		const Type* value() const noexcept
@@ -110,7 +103,9 @@ namespace rdb::type
 
 		constexpr std::size_t storage() const noexcept
 		{
-			return sizeof(Type);
+			if (_null)
+				return 1;
+			return _value()->storage() + 1;
 		}
 		std::string print() const noexcept
 		{
@@ -124,16 +119,18 @@ namespace rdb::type
 			}
 		}
 
-		wproc_query_result wproc(proc_opcode opcode, proc_param arguments, wproc_query query) noexcept
+		wproc_query_result wproc(proc_opcode opcode, const proc_param& arguments, wproc_query query) noexcept
 		{
 			return _value()->wproc(opcode, arguments, query);
 		}
-		rproc_result rproc(proc_opcode opcode, proc_param arguments) const noexcept
+		rproc_result rproc(proc_opcode opcode, const proc_param& arguments) const noexcept
 		{
 			return _value()->rproc(opcode, arguments);
 		}
-		bool fproc(proc_opcode opcode, proc_param arguments) const noexcept
+		bool fproc(proc_opcode opcode, const proc_param& arguments) const noexcept
 		{
+			if (opcode == Op::IsNull)
+				return _null;
 			return _value()->fproc(opcode, arguments);
 		}
 	};

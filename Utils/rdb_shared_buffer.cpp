@@ -135,8 +135,15 @@ namespace rdb
 	{
 		return _block;
 	}
+
+	bool SharedBuffer::empty() const noexcept
+	{
+		return _block == nullptr;
+	}
 	std::size_t SharedBuffer::size() const noexcept
 	{
+		if (_block == nullptr)
+			return 0;
 		return _block->_size;
 	}
 
@@ -176,6 +183,10 @@ namespace rdb
 	std::uint64_t SourceMultiplexer::digest() const noexcept
 	{
 		return _digest;
+	}
+	bool SourceMultiplexer::empty() const noexcept
+	{
+		return _size == 0;
 	}
 
 	void SourceMultiplexer::push(std::span<const unsigned char> data) noexcept
@@ -235,15 +246,42 @@ namespace rdb
 		return _data.size() - _pos;
 	}
 
-	void SharedBufferSink::Append(const char* data, std::size_t cnt)
+	StaticBufferSink::StaticBufferSink(std::size_t size)
 	{
-		resize(_pos + cnt);
-		std::memcpy(static_cast<char*>(_block->memory()) + _pos, data, cnt);
+		_buffer.reserve(size);
+	}
+	StaticBufferSink::StaticBufferSink(std::size_t size, std::span<unsigned char> pool)
+		: _buffer_pool(pool.data(), pool.size())
+	{
+		_buffer.reserve(size);
+	}
+
+	void StaticBufferSink::Append(const char* data, std::size_t cnt)
+	{
+		_buffer.resize(_buffer.size() + cnt);
+		std::memcpy(&_buffer[_pos], data, cnt);
 		_pos += cnt;
 	}
-	char* SharedBufferSink::GetAppendBuffer(std::size_t len, char* scratch)
+	char* StaticBufferSink::GetAppendBuffer(std::size_t len, char* scratch)
 	{
-		resize(_pos + len);
-		return static_cast<char*>(_block->memory()) + _pos;
+		_buffer.resize(_pos + len);
+		return &_buffer[_pos];
+	}
+
+	std::size_t StaticBufferSink::size() const noexcept
+	{
+		return _buffer.size();
+	}
+	std::span<const unsigned char> StaticBufferSink::data() const noexcept
+	{
+		return {
+			reinterpret_cast<const unsigned char*>(_buffer.data()),
+			_buffer.size()
+		};
+	}
+	void StaticBufferSink::clear() noexcept
+	{
+		_buffer.clear();
+		_buffer.shrink_to_fit();
 	}
 }

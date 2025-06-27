@@ -28,29 +28,25 @@ namespace rdb::type
 		explicit ScalarBase(const Type& value)
 			: _value(byte::byteswap_for_storage(value)) {}
 
-		enum rOp : proc_opcode { };
-		enum wOp : proc_opcode
+		struct Op : InterfaceDeclProcPrimary<
+			DeclWrite<ScalarBase, ScalarBase, ScalarBase>,
+			DeclFilter<ScalarBase, ScalarBase, ScalarBase>,
+			DeclRead<>
+		>
 		{
-			Add = 'a',
-			Mul = 'm',
-			Div = 'd'
-		};
-		enum fOp : proc_opcode
-		{
-			Smaller = proc_opcode(SortFilterOp::Smaller),
-			Larger = proc_opcode(SortFilterOp::Larger),
-			Equal = proc_opcode(SortFilterOp::Equal),
-		};
-
-		template<wOp Op>
-		struct WritePair
-		{
-			using param = ScalarBase;
-		};
-		template<fOp Op>
-		struct FilterPair
-		{
-			using param = ScalarBase;
+			enum w : proc_opcode
+			{
+				Add,
+				Mul,
+				Div
+			};
+			enum r : proc_opcode {};
+			enum f : proc_opcode
+			{
+				Smaller = proc_opcode(SortFilterOp::Smaller),
+				Larger = proc_opcode(SortFilterOp::Larger),
+				Equal = proc_opcode(SortFilterOp::Equal),
+			};
 		};
 
 		const Type* underlying() const noexcept
@@ -87,7 +83,7 @@ namespace rdb::type
 			return util::to_string(value());
 		}
 
-		wproc_query_result wproc(proc_opcode opcode, proc_param arguments, wproc_query query) noexcept
+		wproc_query_result wproc(proc_opcode opcode, const proc_param& arguments, wproc_query query) noexcept
 		{
 			if (query == wproc_query::Commit)
 			{
@@ -97,9 +93,9 @@ namespace rdb::type
 						TypedView<ScalarBase>::view(arguments.data())->_value
 					);
 					Type result;
-					if (opcode == wOp::Add) result = value() + arg;
-					else if (opcode == wOp::Mul) result = value() * arg;
-					else if (opcode == wOp::Div) result = value() / arg;
+					if (opcode == Op::Add) result = value() + arg;
+					else if (opcode == Op::Mul) result = value() * arg;
+					else if (opcode == Op::Div) result = value() / arg;
 					_value = byte::byteswap_for_storage(result);
 					return wproc_status::Ok;
 				}
@@ -110,15 +106,15 @@ namespace rdb::type
 			}
 			return wproc_type::Static;
 		}
-		rproc_result rproc(proc_opcode, proc_param) const noexcept { return View(); }
-		bool fproc(proc_opcode opcode, proc_param arguments) const noexcept
+		rproc_result rproc(proc_opcode, const proc_param&) const noexcept { return View(); }
+		bool fproc(proc_opcode opcode, const proc_param& arguments) const noexcept
 		{
 			const auto arg = byte::byteswap_for_storage(
 				TypedView<ScalarBase>::view(arguments.data())->_value
 			);
-			if (opcode == fOp::Larger) return value() > arg;
-			else if (opcode == fOp::Smaller) return value() < arg;
-			else if (opcode == fOp::Equal) return value() == arg;
+			if (opcode == Op::Larger) return value() > arg;
+			else if (opcode == Op::Smaller) return value() < arg;
+			else if (opcode == Op::Equal) return value() == arg;
 			return false;
 		}
 	};

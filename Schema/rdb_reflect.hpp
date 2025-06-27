@@ -174,9 +174,9 @@ namespace rdb
 			std::size_t(*storage)(const void*);
 			std::size_t(*sstorage)();
 			key_type(*hash)(const void*);
-			wproc_query_result(*wproc)(void*, proc_opcode, proc_param, wproc_query);
-			rproc_result(*rproc)(const void*, proc_opcode, proc_param);
-			bool(*fproc)(const void*, proc_opcode, proc_param);
+			wproc_query_result(*wproc)(void*, proc_opcode, const proc_param&, wproc_query);
+			rproc_result(*rproc)(const void*, proc_opcode, const proc_param&);
+			bool(*fproc)(const void*, proc_opcode, const proc_param&);
 			bool(*fragmented)();
 			AccumulatorHandle(*accumulate)(){ nullptr };
 			CompressorHandle(*compress)(){ nullptr };
@@ -195,18 +195,18 @@ namespace rdb
 	public:
 		struct RTSI
 		{
-			void(*construct)(void*, View);
-			std::size_t(*cstorage)(View);
+			void(*construct)(void*, const View&);
+			std::size_t(*cstorage)(const View&);
 			std::size_t(*alignment)();
 			std::size_t(*storage)(const void*);
 
-			std::size_t(*fwapply)(void*, std::size_t, View, std::size_t);
-			std::size_t(*wpapply)(void*, std::size_t, proc_opcode, proc_param, std::size_t);
+			std::size_t(*fwapply)(void*, std::size_t, const View&, std::size_t);
+			std::size_t(*wpapply)(void*, std::size_t, proc_opcode, const proc_param&, std::size_t);
 
 			View(*cfield)(const void*, std::size_t);
 			View(*field)(void*, std::size_t);
 			View(*skfield)(const void*, std::size_t);
-			View(*transcode)(version_type, View);
+			View(*transcode)(version_type, const View&);
 
 			key_type(*hash_partition)(const void*);
 			std::size_t(*partition_size)(const void*);
@@ -218,6 +218,15 @@ namespace rdb
 			RuntimeInterfaceReflection::RTII&(*reflect)(std::size_t);
 			RuntimeInterfaceReflection::RTII&(*reflect_pkey)(std::size_t);
 			RuntimeInterfaceReflection::RTII&(*reflect_skey)(std::size_t);
+
+			std::string(*print_data)(const void*);
+			std::string(*print_partition_data)(const void*);
+			std::string(*show_topology)();
+			std::string(*show_parition_topology)();
+
+			bool(*sort_key_equal)(const View&, const View&);
+			bool(*sort_key_order)(const View&, const View&);
+			int(*sort_key_compare)(const View&, const View&);
 		};
 	private:
 		static inline std::unordered_map<schema_type, RTSI> _schema_info{};

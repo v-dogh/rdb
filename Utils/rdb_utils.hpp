@@ -489,6 +489,11 @@ namespace rdb
 			_move(std::move(copy));
 		}
 
+		bool is_view() const noexcept
+		{
+			return std::holds_alternative<std::span<const unsigned char>>(_data);
+		}
+
 		std::span<const unsigned char> data() const noexcept
 		{
 			return _data_impl();
@@ -601,10 +606,10 @@ namespace rdb
 	using View = StackView<>;
 
 	template<typename Type, std::size_t Align>
-	class AlignedTypedView : public StackView<sizeof(Type), Align>
+	class AlignedTypedView : public StackView<32, Align>
 	{
 	private:
-		using base = StackView<sizeof(Type), Align>;
+		using base = StackView<32, Align>;
 	public:
 		// From StackView
 
@@ -693,6 +698,22 @@ namespace rdb
 		AlignedTypedView(const base& view) noexcept : base(view) {}
 		AlignedTypedView(base&& view) noexcept : base(std::move(view)) {}
 
+		AlignedTypedView subview(std::size_t off, std::size_t length = ~0ull) const noexcept
+		{
+			return view(this->data().subspan(off, length));
+		}
+		AlignedTypedView subview(std::size_t off, std::size_t length = ~0ull) noexcept
+		{
+			if (this->is_view())
+			{
+				return view(this->data().subspan(off, length));
+			}
+			else
+			{
+				return view(this->mutate().subspan(off, length));
+			}
+		}
+
 		AlignedTypedView& operator=(const AlignedTypedView&) noexcept = default;
 		AlignedTypedView& operator=(AlignedTypedView&&) noexcept = default;
 
@@ -723,6 +744,8 @@ namespace rdb
 
 	namespace util
 	{
+		void spinlock_yield() noexcept;
+
 		template<std::size_t Count>
 		std::size_t bitset_first(const std::bitset<Count>& value) noexcept
 		{

@@ -1,7 +1,7 @@
 #ifndef RDB_DBG_HPP
 #define RDB_DBG_HPP
 
-#ifndef NDEBUG
+#if !defined(NDEBUG) || defined(RDB_RUNTIME_LOGS)
 #include <iostream>
 #include <format>
 #include <source_location>

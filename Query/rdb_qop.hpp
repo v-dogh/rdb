@@ -16,6 +16,7 @@ namespace rdb::cmd
 		Dump,
 		WProc,
 		RProc,
+		Page,
 
 		// Filter operands
 

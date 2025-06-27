@@ -6,6 +6,7 @@
 #include <Types/rdb_tuple.hpp>
 #include <Types/rdb_scalar.hpp>
 #include <Types/rdb_array_iterator.hpp>
+#include <Types/rdb_trivial_helper.hpp>
 #include <sstream>
 #include <numeric>
 
@@ -21,16 +22,17 @@ namespace rdb::type
 		static constexpr auto _is_dynamic = Type::uproperty.is(Type::uproperty.dynamic);
 		static constexpr auto _is_trivial = Type::uproperty.is(Type::uproperty.trivial);
 	public:
+		using trivial_type = typename impl::TrivialInterface<Type>::value_type;
 		using view_list = std::span<const TypedView<Type>>;
 		using list = std::initializer_list<TypedView<Type>>;
-		using trivial_list = std::span<const typename Type::value_type>;
+		using trivial_list = std::span<const trivial_type>;
 		using iterator = impl::ArrayIterator<Type, false, !_is_dynamic>;
 		using const_iterator = impl::ArrayIterator<Type, true, !_is_dynamic>;
 	private:
 		std::span<const unsigned char> _binary_buffer(std::size_t off = 0) const noexcept
 		{
 			return std::span(static_cast<const unsigned char*>(
-				this->_dynamic_field()
+				this->_dynamic_field(0)
 			) + off, std::dynamic_extent);
 		}
 		std::span<unsigned char> _binary_buffer(std::size_t off = 0) noexcept
@@ -46,7 +48,7 @@ namespace rdb::type
 		const Type* _buffer(std::size_t off = 0) const noexcept
 		{
 			return reinterpret_cast<const Type*>(static_cast<const unsigned char*>(
-				this->_dynamic_field()
+				this->_dynamic_field(0)
 			) + off);
 		}
 		Type* _buffer(std::size_t off = 0) noexcept
@@ -126,7 +128,7 @@ namespace rdb::type
 					cpy.begin(),
 					cpy.begin() + m,
 					std::size_t{ 0 },
-					[](const auto& value, std::size_t ctr) {
+					[](std::size_t ctr, const auto& value) {
 						return ctr + value->storage();
 					}
 				);
@@ -200,7 +202,7 @@ namespace rdb::type
 				const auto beg = off;
 				off += it->size();
 				std::memcpy(
-					_binary_buffer(beg),
+					_binary_buffer(beg).data(),
 					it->data().data(),
 					it->size()
 				);
@@ -218,7 +220,7 @@ namespace rdb::type
 		explicit ArrayBase(trivial_list li)
 			requires _is_trivial
 		{
-			std::size_t off = std::min(Size, li.size()) * sizeof(typename Type::value_type);
+			std::size_t off = std::min(Size, li.size()) * sizeof(trivial_type);
 			std::memcpy(
 				_buffer(),
 				li.data(),
@@ -235,47 +237,37 @@ namespace rdb::type
 			}
 		}
 
-		enum rOp : proc_opcode
+		struct Op : InterfaceDeclProcPrimary<
+			DeclWrite<
+				Tuple<Uint64, ArrayBase>,
+				Tuple<Uint64, Type>
+			>,
+			DeclFilter<>,
+			DeclRead<
+				rdb::ReadPair<Tuple<Uint64, Uint64>, ArrayBase>,
+				rdb::ReadPair<Uint64, Type>
+			>
+		>
 		{
-			Range = 'R',
-			Read = 'r'
-		};
-		enum wOp : proc_opcode
-		{
-			// [ Offset, Values ]
-			Overwrite = 'O',
-			// [ Offset, Value ]
-			Write = 'w'
-		};
-		enum fOp : proc_opcode { };
-
-		template<rOp Op> struct ReadPair { };
-		template<> struct ReadPair<rOp::Range>
-		{
-			using param = Tuple<Uint64, Uint64>;
-			using result = ArrayBase;
-		};
-		template<> struct ReadPair<rOp::Read>
-		{
-			using param = Uint64;
-			using result = Type;
-		};
-
-		template<wOp Op> struct WritePair { };
-		template<> struct WritePair<wOp::Overwrite>
-		{
-			using param = Tuple<Uint64, ArrayBase>;
-		};
-		template<> struct WritePair<wOp::Write>
-		{
-			using param = Tuple<Uint64, Type>;
+			enum w : proc_opcode
+			{
+				// [ Offset, Values ]
+				Overwrite,
+				// [ Offset, Value ]
+				Write
+			};
+			enum r : proc_opcode
+			{
+				Range,
+				Read
+			};
+			enum f : proc_opcode
+			{
+				// [ Position ] -> [ Value ]
+				Test
+			};
 		};
 
-		template<fOp Op>
-		struct FilterPair
-		{
-			using param = ArrayBase;
-		};
 
 		std::size_t size() const noexcept
 		{
@@ -291,12 +283,12 @@ namespace rdb::type
 			return *_at_impl(idx);
 		}
 
-		const typename Type::value_type* data() const noexcept
+		const trivial_type* data() const noexcept
 			requires _is_trivial
 		{
 			return _buffer()->underlying();
 		}
-		typename Type::value_type* data() noexcept
+		trivial_type* data() noexcept
 			requires _is_trivial
 		{
 			return _buffer()->underlying();
@@ -389,15 +381,15 @@ namespace rdb::type
 			return out.str();
 		}
 
-		wproc_query_result wproc(proc_opcode opcode, proc_param arguments, wproc_query query) noexcept
+		wproc_query_result wproc(proc_opcode opcode, const proc_param& arguments, wproc_query query) noexcept
 		{
 
 		}
-		rproc_result rproc(proc_opcode opcode, proc_param) const noexcept
+		rproc_result rproc(proc_opcode opcode, const proc_param&) const noexcept
 		{
 
 		}
-		bool fproc(proc_opcode opcode, proc_param arguments) const noexcept { }
+		bool fproc(proc_opcode opcode, const proc_param& arguments) const noexcept { }
 	};
 
 	template<std::size_t Size, typename Type>

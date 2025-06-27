@@ -1,4 +1,5 @@
 #include <rdb_reflect.hpp>
+#include <rdb_dbg.hpp>
 
 namespace rdb
 {
@@ -31,81 +32,27 @@ namespace rdb
 	}
 	RuntimeSchemaReflection::RTSI& RuntimeSchemaReflection::reg(schema_type ucode, RTSI info) noexcept
 	{
+		if (fetch(ucode) != nullptr)
+			RDB_WARN("Overriding already existing schema information (either conflicting names or duplicate require expression)")
 		return (_schema_info[ucode] = std::move(info));
 	}
 
 	bool SortKeyComparator::operator()(const View& lhs, const View& rhs) const noexcept
 	{
-		const auto* ldata = lhs.data().data();
-		const auto* rdata = rhs.data().data();
 		RuntimeSchemaReflection::RTSI& info
 			= RuntimeSchemaReflection::info(schema);
-		std::size_t off1 = 0;
-		std::size_t off2 = 0;
-		for (std::size_t i = 0; i < info.skeys(); i++)
-		{
-			RuntimeInterfaceReflection::RTII& key =
-				info.reflect_skey(i);
-			Order ordering = info.skey_order(i);
-			if (key.fproc(
-					ldata + off1, proc_opcode(SortFilterOp::Smaller),
-					View::view(std::span(rdata + off2, std::dynamic_extent)))
-				)
-				return ordering == Order::Ascending;
-			else if (key.fproc(
-					ldata + off1, proc_opcode(SortFilterOp::Larger),
-					View::view(std::span(rdata + off2, std::dynamic_extent)))
-				)
-				return ordering != Order::Ascending;
-			off1 += key.storage(ldata + off1);
-			off2 += key.storage(rdata + off2);
-		}
-		return false;
+		return info.sort_key_order(lhs, rhs);
 	}
 	int ThreewaySortKeyComparator::operator()(const View& lhs, const View& rhs) const noexcept
 	{
-		const auto* ldata = lhs.data().data();
-		const auto* rdata = rhs.data().data();
 		RuntimeSchemaReflection::RTSI& info
 			= RuntimeSchemaReflection::info(schema);
-		std::size_t off1 = 0;
-		std::size_t off2 = 0;
-		for (std::size_t i = 0; i < info.skeys(); i++)
-		{
-			RuntimeInterfaceReflection::RTII& key =
-				info.reflect_skey(i);
-			if (key.fproc(
-					ldata + off1, proc_opcode(SortFilterOp::Smaller),
-					View::view(std::span(rdata + off2, std::dynamic_extent)))
-				)
-				return -1;
-			else if (key.fproc(
-					ldata + off1, proc_opcode(SortFilterOp::Larger),
-					View::view(std::span(rdata + off2, std::dynamic_extent)))
-				)
-				return 1;
-			off1 += key.storage(ldata + off1);
-			off2 += key.storage(rdata + off2);
-		}
-		return 0;
+		return info.sort_key_compare(lhs, rhs);
 	}
 	std::pair<bool, std::size_t> EqualityKeyComparator::operator()(const View& lhs, const View& rhs) const noexcept
 	{
-		const auto* ldata = lhs.data().data();
 		RuntimeSchemaReflection::RTSI& info
 			= RuntimeSchemaReflection::info(schema);
-		std::size_t off1 = 0;
-		bool match = true;
-		for (std::size_t i = 0; i < info.skeys(); i++)
-		{
-			RuntimeInterfaceReflection::RTII& key =
-				info.reflect_skey(i);
-			match = match && key.fproc(
-				ldata + off1, proc_opcode(SortFilterOp::Equal),
-				info.skfield(rhs.data().data(), i)
-			);
-			off1 += key.storage(ldata + off1);
-		}
-		return { match, info.storage(rhs.data().data()) };
+		return { info.sort_key_equal(lhs, rhs), info.storage(rhs.data().data()) };
 	}
 }

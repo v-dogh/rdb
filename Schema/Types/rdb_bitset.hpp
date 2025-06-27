@@ -190,51 +190,35 @@ namespace rdb::type
 			: _bits(li)
 		{ }
 
-		enum rOp : proc_opcode
+		struct Op : InterfaceDeclProcPrimary<
+			DeclWrite<
+				Tuple<Uint64, Boolean>,
+				Uint64,
+				Boolean,
+				Tuple<Uint64, Uint64, Boolean>
+			>,
+			DeclFilter<Uint64>,
+			DeclRead<>
+		>
 		{
-			// -> [ Value ]
-			Test
+			enum w : proc_opcode
+			{
+				// [ Offset, Value ]
+				Set,
+				// [ Value ]
+				Flip,
+				// [ Value ]
+				Fill,
+				// [ Begin, Count, Value ]
+				FillRegion
+			};
+			enum r : proc_opcode {};
+			enum f : proc_opcode
+			{
+				// [ Position ] -> [ Value ]
+				Test
+			};
 		};
-		enum wOp : proc_opcode
-		{
-			// [ Offset, Value ]
-			Set,
-			// [ Value ]
-			Flip,
-			// [ Value ]
-			Fill,
-			// [ Begin, Count, Value ]
-			FillRegion
-		};
-		enum fOp : proc_opcode { };
-
-		template<rOp Op> struct ReadPair { };
-		template<> struct ReadPair<rOp::Test>
-		{
-			using param = Uint64;
-			using result = Boolean;
-		};
-
-		template<wOp Op> struct WritePair { };
-		template<> struct WritePair<wOp::Set>
-		{
-			using param = Tuple<Uint64, Boolean>;
-		};
-		template<> struct WritePair<wOp::Flip>
-		{
-			using param = Uint64;
-		};
-		template<> struct WritePair<wOp::Fill>
-		{
-			using param = Boolean;
-		};
-		template<> struct WritePair<wOp::FillRegion>
-		{
-			using param = Tuple<Uint64, Uint64, Boolean>;
-		};
-
-		template<fOp Op>
-		struct FilterPair { using param = void; };
 
 		key_type hash() const noexcept
 		{
@@ -259,11 +243,11 @@ namespace rdb::type
 			return out.str();
 		}
 
-		wproc_query_result wproc(proc_opcode opcode, proc_param arguments, wproc_query query) noexcept
+		wproc_query_result wproc(proc_opcode opcode, const proc_param& arguments, wproc_query query) noexcept
 		{
 			if (query == wproc_query::Commit)
 			{
-				if (opcode == wOp::Set)
+				if (opcode == Op::Set)
 				{
 					const auto& idx =
 						TypedView<Tuple<Uint64, Boolean>>::view(
@@ -277,7 +261,7 @@ namespace rdb::type
 						return wproc_status::Error;
 					_bits.set(idx, val);
 				}
-				else if (opcode == wOp::Flip)
+				else if (opcode == Op::Flip)
 				{
 					const auto& idx =
 						TypedView<Uint64>::view(
@@ -287,7 +271,7 @@ namespace rdb::type
 						return wproc_status::Error;
 					_bits.flip(idx);
 				}
-				else if (opcode == wOp::Fill)
+				else if (opcode == Op::Fill)
 				{
 					const auto& val =
 						TypedView<Boolean>::view(
@@ -295,7 +279,7 @@ namespace rdb::type
 						)->value();
 					_bits.fill(val);
 				}
-				else if (opcode == wOp::FillRegion)
+				else if (opcode == Op::FillRegion)
 				{
 					const auto& idx =
 						TypedView<Tuple<Uint64, Uint64, Boolean>>::view(
@@ -317,13 +301,20 @@ namespace rdb::type
 			}
 			return wproc_type::Static;
 		}
-		rproc_result rproc(proc_opcode opcode, proc_param) const noexcept
+		rproc_result rproc(proc_opcode opcode, const proc_param&) const noexcept
 		{
 
 		}
-		bool fproc(proc_opcode opcode, proc_param arguments) const noexcept
+		bool fproc(proc_opcode opcode, const proc_param& arguments) const noexcept
 		{
-
+			if (opcode == Op::Test)
+			{
+				const auto& idx =
+					TypedView<Uint64>::view(
+						arguments.data()
+					)->value();
+				return _bits.test(idx);
+			}
 		}
 	};
 }

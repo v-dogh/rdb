@@ -2,28 +2,18 @@
 #define RDB_MEMORY_HPP
 
 #include <bitset>
-#include <unordered_map>
 #include <filesystem>
-#include <cstring>
-#include <span>
-#include <map>
-#include "rdb_reflect.hpp"
-#include "rdb_shared_buffer.hpp"
-#include "rdb_root_config.hpp"
-#include "rdb_utils.hpp"
-#include "rdb_writetype.hpp"
-#include "rdb_keytype.hpp"
-#include "rdb_log.hpp"
+#include <rdb_reflect.hpp>
+#include <rdb_shared_buffer.hpp>
+#include <rdb_root_config.hpp>
+#include <rdb_utils.hpp>
+#include <rdb_writetype.hpp>
+#include <rdb_keytype.hpp>
+#include <rdb_log.hpp>
+#include <rdb_containers.hpp>
 
 namespace rdb
 {
-	// Caches queries for specific table instances
-	// Works in coordination with the memory cache
-	class QueryCache
-	{
-
-	};
-
 	// The memory cache is a per-core immutable structure responsible for batching new writes for a schema
 	// The mount point is responsible for passing reads/writes to correct memory caches
 	// Whenever we receive a new write, we first log it, at the same time we wait until the pressure reaches a critical point (in the MemoryCache)
@@ -36,6 +26,19 @@ namespace rdb
 		using WriteType = rdb::WriteType;
 		using ReadType = rdb::ReadType;
 	private:
+		enum class DataType : char
+		{
+			FieldSequence,
+			SchemaInstance,
+			Tombstone
+		};
+		enum BloomType : char
+		{
+			PK = 1 << 0,
+			PK_F = 1 << 1,
+			PK_SK = 1 << 2,
+		};
+
 		struct FlushHandle
 		{
 			Mapper data{};
@@ -60,52 +63,105 @@ namespace rdb
 				return unlocked.load(std::memory_order::acquire);
 			}
 		};
-		using slot = std::pair<WriteType, SharedBuffer>;
-		using partition = std::map<View, slot, SortKeyComparator>;
+		struct Slot
+		{
+			std::uint32_t capacity;
+			std::uint32_t size;
+			DataType vtype;
+
+			Slot(DataType vtype, std::span<const unsigned char> data) noexcept
+				: capacity(data.size()), size(data.size()), vtype(vtype)
+			{
+				std::memcpy(buffer().data(), data.data(), data.size());
+			}
+			Slot(DataType vtype, std::size_t size) noexcept
+				: capacity(size), size(size), vtype(vtype) {}
+
+			std::span<const unsigned char> buffer() const noexcept
+			{
+				return std::span(
+					reinterpret_cast<const unsigned char*>(this) + sizeof(std::uint32_t) * 2 + sizeof(DataType),
+					size
+				);
+			}
+			std::span<unsigned char> buffer() noexcept
+			{
+				return std::span(
+					reinterpret_cast<unsigned char*>(this) + sizeof(std::uint32_t) * 2 + sizeof(DataType),
+					size
+				);
+			}
+
+			std::span<const unsigned char> flush_buffer() const noexcept
+			{
+				return std::span(
+					reinterpret_cast<const unsigned char*>(this) + offsetof(Slot, vtype),
+					size + sizeof(DataType)
+				);
+			}
+			std::span<unsigned char> flush_buffer() noexcept
+			{
+				return std::span(
+					reinterpret_cast<unsigned char*>(this) + offsetof(Slot, vtype),
+					size + sizeof(DataType)
+				);
+			}
+
+			static auto allocation_size(DataType vtype, std::span<const unsigned char> data) noexcept
+			{
+				return sizeof(std::uint32_t) * 2 + sizeof(DataType) + data.size();
+			}
+			static auto allocation_size(DataType vtype, std::size_t size) noexcept
+			{
+				return sizeof(std::uint32_t) * 2 + sizeof(DataType) + size;
+			}
+		};
+		struct SlotDeleter
+		{
+			static Slot* allocate(DataType vtype, std::span<const unsigned char> data) noexcept
+			{
+				return ct::ordered_byte_map<Slot>::allocate_node(vtype, data);
+			}
+			static Slot* allocate(DataType vtype, std::size_t size) noexcept
+			{
+				return ct::ordered_byte_map<Slot>::allocate_node(vtype, size);
+			}
+			void operator()(Slot* slot) noexcept
+			{
+				ct::ordered_byte_map<Slot>::delete_node(slot);
+			}
+		};
+
+		using slot = Slot*;
+		using const_slot = const Slot*;
+		using single_slot = std::unique_ptr<Slot, SlotDeleter>;
+		using partition = ct::ordered_byte_map<Slot>;
+		using partition_variant = std::variant<single_slot, partition>;
 		using write_store =
-			std::unordered_map<
+			ct::hash_map<
 				key_type,
 				std::pair<
 					View,
-					std::variant<
-						slot,
-						partition,
-						std::nullopt_t
-					>
+					partition_variant
 				>
 			>;
-		enum class DataType : char
-		{
-			FieldSequence = 'f',
-			SchemaInstance = 's',
-			Tombstone = 'r'
-		};
-		enum BloomType : char
-		{
-			PK = 1 << 0,
-			PK_F = 1 << 1,
-			PK_SK = 1 << 2,
-		};
 	private:
 		std::filesystem::path _path{};
 		std::atomic<std::size_t> _flush_running{ 0 };
 		std::atomic<std::size_t> _flush_id{ 0 };
 		std::shared_ptr<write_store> _map{};
-		std::vector<std::weak_ptr<write_store>> _readonly_maps{};
+		ct::vector<std::weak_ptr<write_store>> _readonly_maps{};
 
-		mutable std::vector<FlushHandle> _handle_cache{};
-		mutable std::vector<std::size_t> _handle_cache_tracker{};
+		mutable ct::vector<FlushHandle> _handle_cache{};
+		mutable ct::vector<std::size_t> _handle_cache_tracker{};
 		mutable std::size_t _mappings{ 0 };
 		mutable std::size_t _descriptors{ 0 };
 
 		std::size_t _pressure{ 0 };
 		std::size_t _id{ 0 };
 		schema_type _schema{};
-		QueryCache _qcache{};
 		Config* _cfg{ nullptr };
 		Log _logs{};
-
-		std::pair<View, bool> _apply_wproc(std::variant<View, SharedBuffer> data, std::size_t field, proc_opcode opcode, proc_param params) noexcept;
 
 		std::size_t _cpu() const noexcept;
 
@@ -114,31 +170,35 @@ namespace rdb
 		void _handle_close_soft(std::size_t flush) const noexcept;
 		void _handle_close(std::size_t flush) const noexcept;
 
-		partition _make_partition() const noexcept;
-		SharedBuffer _make_shared_buffer(WriteType type, std::span<const unsigned char> data, std::size_t alignment = 0) noexcept;
-		void _merge_field_buffers(WriteType type, SharedBuffer buffer, std::span<const unsigned char> data) noexcept;
+		std::size_t _read_entry_size_impl(const View& view) noexcept;
+		std::size_t _read_entry_impl(const View& view, field_bitmap& fields, const read_callback* callback) noexcept;
+		std::size_t _read_cache_impl(write_store& map, key_type key, const View& sort, field_bitmap& fields, const read_callback* callback) noexcept;
 
-		const slot* _find_sorted_slot(const write_store& map, key_type key, View sort) noexcept;
-		const slot* _find_unsorted_slot(const write_store& map, key_type key) noexcept;
-		const slot* _find_slot(const write_store& map, key_type key, View sort) noexcept;
+		bool _read_impl(key_type key, const View& sort, field_bitmap fields, const read_callback* callback) noexcept;
 
-		slot& _emplace_sorted_slot(write_store::iterator partition, View sort) noexcept;
-		slot& _emplace_unsorted_slot(write_store::iterator partition) noexcept;
-		slot& _emplace_slot(write_store::iterator partition, View sort) noexcept;
-
-		std::size_t _read_entry_size_impl(View view) noexcept;
-		std::size_t _read_entry_impl(View view, field_bitmap& fields, const read_callback* callback) noexcept;
-		std::size_t _read_cache_impl(const write_store& map, key_type key, View sort, field_bitmap& fields, const read_callback* callback) noexcept;
-
-		bool _read_impl(key_type key, View sort, field_bitmap fields, const read_callback* callback) noexcept;
-
-		write_store::iterator _create_partition_log_if(write_store& map, key_type key, View partition) noexcept;
-		write_store::iterator _create_partition_if(write_store& map, key_type key, View partition) noexcept;
+		write_store::iterator _create_partition_log_if(write_store& map, key_type key, const View& partition) noexcept;
+		write_store::iterator _create_partition_if(write_store& map, key_type key, const View& partition) noexcept;
 		write_store::iterator _find_partition(write_store& map, key_type key) noexcept;
 
-		void _write_impl(write_store::iterator partition, WriteType type, View sort, std::span<const unsigned char> data) noexcept;
-		void _reset_impl(write_store::iterator partition, View sort) noexcept;
-		void _remove_impl(write_store::iterator partition, View sort) noexcept;
+		slot _create_sorted_slot(write_store::iterator partition, const View& sort, DataType vtype, std::size_t reserve);
+		slot _create_unsorted_slot(write_store::iterator partition, DataType vtype, std::size_t reserve);
+		slot _create_slot(write_store::iterator partition, const View& sort, DataType vtype, std::size_t reserve);
+
+		slot _create_sorted_slot(write_store::iterator partition, const View& sort, DataType vtype, std::span<const unsigned char> buffer);
+		slot _create_unsorted_slot(write_store::iterator partition, DataType vtype, std::span<const unsigned char> buffer);
+		slot _create_slot(write_store::iterator partition, const View& sort, DataType vtype, std::span<const unsigned char> buffer);
+
+		slot _find_sorted_slot(write_store::iterator partition, const View& sort);
+		slot _find_unsorted_slot(write_store::iterator partition);
+		slot _find_slot(write_store::iterator partition, const View& sort);
+
+		slot _resize_sorted_slot(write_store::iterator partition, const View& sort, std::size_t size);
+		slot _resize_unsorted_slot(write_store::iterator partition, std::size_t size);
+		slot _resize_slot(write_store::iterator partition, const View& sort, std::size_t size);
+
+		void _write_impl(write_store::iterator partition, WriteType type, const View& sort, std::span<const unsigned char> data) noexcept;
+		void _reset_impl(write_store::iterator partition, const View& sort) noexcept;
+		void _remove_impl(write_store::iterator partition, const View& sort) noexcept;
 
 		bool _bloom_may_contain(key_type key, FlushHandle* handle) const noexcept;
 		std::size_t _bloom_bits(std::size_t keys) const noexcept;
@@ -162,12 +222,13 @@ namespace rdb
 		std::size_t pressure() const noexcept;
 		std::size_t descriptors() const noexcept;
 
-		void read(key_type key, View sort, field_bitmap fields, const read_callback& callback) noexcept;
-		bool exists(key_type key, View sort) noexcept;
+		View page(key_type key, std::size_t count) noexcept;
+		void read(key_type key, const View& sort, field_bitmap fields, const read_callback& callback) noexcept;
+		bool exists(key_type key, const View& sort) noexcept;
 
-		void write(WriteType type, key_type key, View partition, View sort, std::span<const unsigned char> data) noexcept;
-		void reset(key_type key, View partition, View sort) noexcept;
-		void remove(key_type key, View sort) noexcept;
+		void write(WriteType type, key_type key, const View& partition, const View& sort, std::span<const unsigned char> data) noexcept;
+		void reset(key_type key, const View& partition, const View& sort) noexcept;
+		void remove(key_type key, const View& sort) noexcept;
 		void flush() noexcept;
 		void clear() noexcept;
 

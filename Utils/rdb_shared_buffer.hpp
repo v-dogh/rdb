@@ -5,9 +5,10 @@
 #include <cstring>
 #include <atomic>
 #include <span>
+#include <rdb_memunits.hpp>
+#include <rdb_containers.hpp>
 #include <Snappy/snappy.h>
 #include <Snappy/snappy-sinksource.h>
-#include <rdb_memunits.hpp>
 
 namespace rdb
 {
@@ -65,6 +66,8 @@ namespace rdb
 
 		impl::SharedBufferData* block() const noexcept;
 
+		bool empty() const noexcept;
+
 		std::size_t size() const noexcept;
 
 		void resize(std::size_t size, std::size_t reserve = 0) noexcept;
@@ -117,6 +120,7 @@ namespace rdb
 		std::size_t fragments() const noexcept;
 		std::size_t size() const noexcept;
 		std::uint64_t digest() const noexcept;
+		bool empty() const noexcept;
 
 		void push(std::span<const unsigned char> data) noexcept;
 		void flush() noexcept;
@@ -141,20 +145,29 @@ namespace rdb
 		virtual void Skip(std::size_t cnt) override;
 		virtual std::size_t Available() const override;
 	};
-	class SharedBufferSink :
-		public SharedBuffer,
-		public snappy::Sink
+	class StaticBufferSink : public snappy::Sink
 	{
 	private:
+		std::pmr::monotonic_buffer_resource _buffer_pool{};
+		std::pmr::vector<char> _buffer{ &_buffer_pool };
 		std::size_t _pos{ 0 };
 	public:
-		using SharedBuffer::SharedBuffer;
-		virtual ~SharedBufferSink() = default;
+		StaticBufferSink() = default;
+		StaticBufferSink(std::size_t, std::span<unsigned char> pool);
+		StaticBufferSink(std::size_t size);
+		StaticBufferSink(const StaticBufferSink&) = delete;
+		StaticBufferSink(StaticBufferSink&&) = delete;
+		virtual ~StaticBufferSink() = default;
 
 		virtual void Append(const char* data, std::size_t cnt) override;
 		virtual char* GetAppendBuffer(std::size_t len, char* scratch) override;
 
-		using SharedBuffer::operator=;
+		std::size_t size() const noexcept;
+		std::span<const unsigned char> data() const noexcept;
+		void clear() noexcept;
+
+		StaticBufferSink& operator=(const StaticBufferSink&) = delete;
+		StaticBufferSink& operator=(StaticBufferSink&&) = delete;
 	};
 }
 
