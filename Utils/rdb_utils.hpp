@@ -13,9 +13,6 @@
 #include <array>
 #include <span>
 #include <string>
-#include <iomanip>
-#include <sstream>
-#include <memory>
 #include <rdb_keytype.hpp>
 
 namespace rdb
@@ -35,7 +32,7 @@ namespace rdb
 
 			constexpr auto view() const
 			{
-				return std::string_view(data.begin(), data.end());
+				return std::string_view(data.begin(), data.end() - 1);
 			}
 			constexpr auto operator*() const noexcept
 			{
@@ -55,8 +52,8 @@ namespace rdb
 		template<int Value>
 		consteval auto int_to_const_string() noexcept
 		{
-			ConstString<int_count_digits(Value)> str{};
-			std::size_t idx = str.data.size();
+			ConstString<int_count_digits(Value) + 1> str{};
+			std::size_t idx = str.data.size() - 1;
 
 			auto val = int_abs(Value);
 			do
@@ -79,15 +76,15 @@ namespace rdb
 			ConstString<(Str.data.size() + ...)> result;
 
 			std::size_t off = 0;
-			([&]<ConstString Cur>()
+			([&]()
 			{
 				std::copy(
-					Cur.data.begin(),
-					Cur.data.end(),
+					Str.data.begin(),
+					Str.data.end(),
 					result.data.begin() + off
 				);
-				off += Cur.data.size();
-			}.template operator()<Str>(), ...);
+				off += Str.data.size();
+			}(), ...);
 
 			return result;
 		}
@@ -120,6 +117,13 @@ namespace rdb
 			std::span<unsigned char> view() noexcept;
 
 			constexpr auto operator<=>(const uint128_t& copy) const noexcept = default;
+			constexpr uint128_t operator~() const noexcept
+			{
+				return {
+					.low = ~low,
+					.high = ~high
+				};
+			}
 		};
 
 		constexpr auto table_compact = std::string_view(
@@ -141,8 +145,10 @@ namespace rdb
 
 		std::uint64_t random_machine() noexcept;
 		std::uint64_t stable_machine() noexcept;
-		uint128_t ugen(std::uint64_t machine) noexcept;
-		uint128_t ugen() noexcept;
+
+		uint128_t ugen_order_invert(uint128_t id) noexcept;
+		uint128_t ugen_time(std::uint64_t machine, bool ascending = true) noexcept;
+		uint128_t ugen_random() noexcept;
 
 		std::size_t decode(const std::string& uuid, std::string_view table) noexcept;
 		std::string encode(std::size_t id, std::string_view table) noexcept;
@@ -154,11 +160,11 @@ namespace rdb
 		key_type xxhash_combine(std::span<const key_type> li, key_type seed = 0xaf02cb96) noexcept;
 	}
 
-	template<std::size_t Inline = 32, std::size_t Align = 0>
+	template<std::size_t Inline = 32>
 	class StackView
 	{
 	private:
-		using sbo = std::pair<std::aligned_storage_t<Inline, Align>, std::size_t>;
+		using sbo = std::pair<std::array<unsigned char, Inline>, std::size_t>;
 		std::variant<
 			sbo,
 			std::span<const unsigned char>,
@@ -179,15 +185,12 @@ namespace rdb
 			}
 			else if (std::holds_alternative<std::vector<unsigned char>>(_data))
 			{
-				return _align(std::get<std::vector<unsigned char>>(_data));
+				return std::get<std::vector<unsigned char>>(_data);
 			}
 			else if (std::holds_alternative<sbo>(_data))
 			{
 				auto& [ v, s ] = std::get<sbo>(_data);
-				return std::span(
-					reinterpret_cast<const unsigned char*>(&v),
-					s
-				);
+				return std::span(v.data(), s);
 			}
 			else
 				return std::span<const unsigned char>();
@@ -215,15 +218,12 @@ namespace rdb
 			}
 			else if (std::holds_alternative<std::vector<unsigned char>>(_data))
 			{
-				return _align(std::span(std::get<std::vector<unsigned char>>(_data)));
+				return std::span(std::get<std::vector<unsigned char>>(_data));
 			}
 			else if (std::holds_alternative<sbo>(_data))
 			{
 				auto& [ v, s ] = std::get<sbo>(_data);
-				return std::span(
-					reinterpret_cast<unsigned char*>(&v),
-					s
-				);
+				return std::span(v.data(), s);
 			}
 			else if (std::holds_alternative<std::span<unsigned char>>(_data))
 			{
@@ -256,57 +256,9 @@ namespace rdb
 			}
 			else
 			{
-				view._data = std::vector<unsigned char>(
-					Align ? size + Align - 1 : size
-				);
+				view._data = std::vector<unsigned char>(size);
 			}
 			return view;
-		}
-
-		static auto _align(std::span<const unsigned char> data) noexcept
-		{
-			if (Align)
-			{
-				void* ptr = const_cast<void*>(static_cast<const void*>(data.data()));
-				std::size_t s = data.size();
-				std::align(
-					Align, data.size() - (Align ? Align - 1 : 0),
-					ptr, s
-				);
-				return std::span(
-					reinterpret_cast<const unsigned char*>(ptr), s
-				).subspan(0, s);
-			}
-			else
-			{
-				return data;
-			}
-		}
-		static auto _align(std::span<unsigned char> data) noexcept
-		{
-			if (Align)
-			{
-				void* ptr = static_cast<void*>(data.data());
-				std::size_t s = data.size();
-				std::align(
-					Align, data.size() - (Align ? Align - 1 : 0),
-					ptr, s
-				);
-				return std::span(
-					reinterpret_cast<unsigned char*>(ptr), s
-				).subspan(0, s);
-			}
-			else
-			{
-				return data;
-			}
-		}
-		static bool _is_aligned(std::span<const unsigned char> data) noexcept
-		{
-			if constexpr (Align)
-				return reinterpret_cast<std::uintptr_t>(data.data()) % Align == 0;
-			else
-				return true;
 		}
 
 		void _copy(const StackView& view) noexcept
@@ -338,7 +290,7 @@ namespace rdb
 			}
 		}
 	public:
-		template<std::size_t, std::size_t>
+		template<std::size_t>
 		friend class StackView;
 
 		template<typename... Argv>
@@ -364,17 +316,19 @@ namespace rdb
 
 			return result;
 		}
-		static auto aligned_view(std::span<const unsigned char> data) noexcept
-		{
-			StackView view;
-			if (_is_aligned(data)) view._data = data;
-			else copy(std::span(data));
-			return view;
-		}
 		static auto view(const StackView& data) noexcept
 		{
 			StackView view;
 			view._data = data.data();
+			return view;
+		}
+		static auto view(StackView& data) noexcept
+		{
+			StackView view;
+			if (data.is_view())
+				view._data = data.data();
+			else
+				view._data = data.mutate();
 			return view;
 		}
 		static auto view(std::span<unsigned char> data) noexcept
@@ -387,6 +341,12 @@ namespace rdb
 		{
 			StackView view;
 			view._data = data;
+			return view;
+		}
+		static auto copy() noexcept
+		{
+			StackView view;
+			view._data = std::vector<unsigned char>();
 			return view;
 		}
 		static auto copy(std::span<const unsigned char> data) noexcept
@@ -469,13 +429,17 @@ namespace rdb
 		static auto copy(std::vector<unsigned char> data) noexcept
 		{
 			StackView view;
-			if (_is_aligned(data)) view._data = std::move(data);
-			else copy(std::span(data));
+			view._data = std::move(data);
 			return view;
 		}
 		static auto copy(std::size_t size) noexcept
 		{
 			return _res(size);
+		}
+
+		static constexpr auto inline_size() noexcept
+		{
+			return Inline;
 		}
 
 		StackView() noexcept = default;
@@ -509,17 +473,28 @@ namespace rdb
 
 		StackView subview(std::size_t off, std::size_t length = ~0ull) const noexcept
 		{
-			return view(data().subspan(off, length));
+			if (std::holds_alternative<std::span<const unsigned char>>(_data))
+			{
+				const auto s = data();
+				return view(s.subspan(off, std::min(length, s.size() - off)));
+			}
+			else
+			{
+				const auto s = mutate();
+				return view(s.subspan(off, std::min(length, s.size() - off)));
+			}
 		}
 		StackView subview(std::size_t off, std::size_t length = ~0ull) noexcept
 		{
 			if (std::holds_alternative<std::span<const unsigned char>>(_data))
 			{
-				return view(data().subspan(off, length));
+				const auto s = data();
+				return view(s.subspan(off, std::min(length, s.size() - off)));
 			}
 			else
 			{
-				return view(mutate().subspan(off, length));
+				const auto s = mutate();
+				return view(s.subspan(off, std::min(length, s.size() - off)));
 			}
 		}
 
@@ -532,26 +507,39 @@ namespace rdb
 			return data().end();
 		}
 
-		template<std::size_t In, std::size_t Al>
-		operator StackView<In, Al>() const noexcept
+		const std::vector<unsigned char>* vec() const noexcept
+		{
+			if (std::holds_alternative<std::vector<unsigned char>>(_data))
+				return &std::get<std::vector<unsigned char>>(_data);
+			return nullptr;
+		}
+		std::vector<unsigned char>* vec() noexcept
+		{
+			if (std::holds_alternative<std::vector<unsigned char>>(_data))
+				return &std::get<std::vector<unsigned char>>(_data);
+			return nullptr;
+		}
+
+		template<std::size_t In>
+		operator StackView<In>() const noexcept
 		{
 			if (std::holds_alternative<std::span<const unsigned char>>(_data))
 			{
-				return StackView<In, Al>::view(data());
+				return StackView<In>::view(data());
 			}
 			else if (std::holds_alternative<std::span<unsigned char>>(_data))
 			{
-				return StackView<In, Al>::view(mutate());
+				return StackView<In>::view(mutate());
 			}
 			else if (std::holds_alternative<std::vector<unsigned char>>(_data))
 			{
-				return StackView<In, Al>::copy(data());
+				return StackView<In>::copy(data());
 			}
 			else if (std::holds_alternative<sbo>(_data))
 			{
-				StackView<In, Al> view;
+				StackView<In> view;
 				auto& from = std::get<sbo>(_data);
-				auto& to = view._data.template emplace<typename StackView<In, Al>::sbo>();
+				auto& to = view._data.template emplace<typename StackView<In>::sbo>();
 				to.second = from.second;
 				std::memcpy(
 					&to.first,
@@ -561,7 +549,7 @@ namespace rdb
 				return view;
 			}
 			else
-				return StackView<In, Al>();
+				return StackView<In>();
 		}
 		operator std::span<const unsigned char>() const noexcept
 		{
@@ -605,45 +593,41 @@ namespace rdb
 	};
 	using View = StackView<>;
 
-	template<typename Type, std::size_t Align>
-	class AlignedTypedView : public StackView<32, Align>
+	template<typename Type>
+	class TypedView : public StackView<32>
 	{
 	private:
-		using base = StackView<32, Align>;
+		using base = StackView<32>;
 	public:
 		// From StackView
 
-		static auto aligned_view(std::span<const unsigned char> data) noexcept
-		{
-			return AlignedTypedView(base::aligned_view(data));
-		}
 		static auto view(std::span<unsigned char> data) noexcept
 		{
-			return AlignedTypedView(base::view(data));
+			return TypedView(base::view(data));
 		}
 		static auto view(std::span<const unsigned char> data) noexcept
 		{
-			return AlignedTypedView(base::view(data));
+			return TypedView(base::view(data));
 		}
-		static auto copy(AlignedTypedView&& data) noexcept
+		static auto copy(TypedView&& data) noexcept
 		{
-			return AlignedTypedView(base::copy(data));
+			return TypedView(base::copy(data));
 		}
-		static auto copy(const AlignedTypedView& data) noexcept
+		static auto copy(const TypedView& data) noexcept
 		{
-			return AlignedTypedView(base::copy(data));
+			return TypedView(base::copy(data));
 		}
 		static auto copy(std::span<const unsigned char> data) noexcept
 		{
-			return AlignedTypedView(base::copy(data));
+			return TypedView(base::copy(data));
 		}
 		static auto copy(std::vector<unsigned char> data) noexcept
 		{
-			return AlignedTypedView(base::copy(data));
+			return TypedView(base::copy(data));
 		}
 		static auto copy(std::size_t size) noexcept
 		{
-			return AlignedTypedView(base::copy(size));
+			return TypedView(base::copy(size));
 		}
 
 		//
@@ -691,18 +675,18 @@ namespace rdb
 			}
 		}
 
-		AlignedTypedView() noexcept = default;
-		AlignedTypedView(std::nullptr_t) noexcept {}
-		AlignedTypedView(const AlignedTypedView&) noexcept = default;
-		AlignedTypedView(AlignedTypedView&&) noexcept = default;
-		AlignedTypedView(const base& view) noexcept : base(view) {}
-		AlignedTypedView(base&& view) noexcept : base(std::move(view)) {}
+		TypedView() noexcept = default;
+		TypedView(std::nullptr_t) noexcept {}
+		TypedView(const TypedView&) noexcept = default;
+		TypedView(TypedView&&) noexcept = default;
+		TypedView(const base& view) noexcept : base(view) {}
+		TypedView(base&& view) noexcept : base(std::move(view)) {}
 
-		AlignedTypedView subview(std::size_t off, std::size_t length = ~0ull) const noexcept
+		TypedView subview(std::size_t off, std::size_t length = ~0ull) const noexcept
 		{
 			return view(this->data().subspan(off, length));
 		}
-		AlignedTypedView subview(std::size_t off, std::size_t length = ~0ull) noexcept
+		TypedView subview(std::size_t off, std::size_t length = ~0ull) noexcept
 		{
 			if (this->is_view())
 			{
@@ -714,8 +698,8 @@ namespace rdb
 			}
 		}
 
-		AlignedTypedView& operator=(const AlignedTypedView&) noexcept = default;
-		AlignedTypedView& operator=(AlignedTypedView&&) noexcept = default;
+		TypedView& operator=(const TypedView&) noexcept = default;
+		TypedView& operator=(TypedView&&) noexcept = default;
 
 		const auto* operator->() const noexcept
 		{
@@ -738,9 +722,6 @@ namespace rdb
 			);
 		}
 	};
-
-	template<typename Type>
-	using TypedView = AlignedTypedView<Type, alignof(Type)>;
 
 	namespace util
 	{
@@ -775,29 +756,6 @@ namespace rdb
 						first = i;
 				}
 			}
-		}
-
-		template<typename Data>
-		std::string hexdump(const Data& data) noexcept
-		{
-			std::ostringstream oss;
-			for (decltype(auto) it : data)
-			{
-				oss
-					<< std::uppercase
-					<< std::hex
-					<< std::setw(2)
-					<< std::setfill('0')
-					<< static_cast<int>(it)
-					<< ' ';
-			}
-
-			std::string result = oss.str();
-			if (!result.empty())
-			{
-				result.pop_back();
-			}
-			return result;
 		}
 
 		std::chrono::nanoseconds measure(auto&& func, std::size_t iterations = 1)

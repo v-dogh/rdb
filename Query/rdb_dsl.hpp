@@ -42,6 +42,7 @@ filter<schema>(partition)
 	| is<"A">(...)
 */
 
+#include "rdb_dbg.hpp"
 #include <memory_resource>
 #include <functional>
 #include <future>
@@ -249,7 +250,7 @@ namespace rdb
 					sizeof(qOp) +
 					sizeof(schema_type) +
 					key.first.size() +
-					key.second.size();
+					key.second.size() + (sizeof(std::uint32_t) * !key.second.empty());
 			}
 			template<typename>
 			constexpr auto fill(std::span<unsigned char> buffer) noexcept
@@ -258,7 +259,11 @@ namespace rdb
 				std::size_t off = sizeof(qOp);
 				off += byte::swrite<schema_type>(buffer, off, Schema::ucode);
 				off += byte::swrite(buffer, off, key.first.data());
-				off += byte::swrite(buffer, off, key.second.data());
+				if (!key.second.empty())
+				{
+					off += byte::swrite<std::uint32_t>(buffer, off, key.second.size());
+					off += byte::swrite(buffer, off, key.second.data());
+				}
 				return off;
 			}
 		};
@@ -306,10 +311,19 @@ namespace rdb
 		};
 
 		template<typename Schema>
-		struct Create : impl::ExtractNothing
+		struct PageFrom : EvalTrait
 		{
 			using schema = Schema;
 			compound_key key{};
+			TableList<Schema>* out{ nullptr };
+			std::size_t count{ 0 };
+
+			constexpr auto extract()
+			{
+				return [out = out](std::size_t op, std::span<const unsigned char> buffer) {
+					out->push(buffer);
+				};
+			}
 
 			template<typename>
 			constexpr auto size() const noexcept
@@ -318,7 +332,47 @@ namespace rdb
 					sizeof(qOp) +
 					sizeof(schema_type) +
 					key.first.size() +
-					key.second.size();
+					key.second.size() +
+					sizeof(std::uint32_t);
+			}
+			template<typename>
+			constexpr auto fill(std::span<unsigned char> buffer) noexcept
+			{
+				buffer[0] = char(qOp::PageFrom);
+				std::size_t off = sizeof(qOp);
+				off += byte::swrite<schema_type>(buffer, off, Schema::ucode);
+				off += byte::swrite(buffer, off, key.first.data());
+				if (!key.second.empty())
+				{
+					off += byte::swrite<std::uint32_t>(buffer, off, key.second.size());
+					off += byte::swrite(buffer, off, key.second.data());
+				}
+				off += byte::swrite(buffer, off, count);
+				return off;
+			}
+			template<typename>
+			constexpr auto eval(std::span<const unsigned char> buffer) const noexcept
+			{
+				out->push(buffer);
+				return 1;
+			}
+		};
+
+		template<typename Schema>
+		struct Create : impl::ExtractNothing
+		{
+			using schema = Schema;
+			Schema::partition::value key{};
+			Schema::data::value data{};
+
+			template<typename>
+			constexpr auto size() const noexcept
+			{
+				return
+					sizeof(qOp) +
+					sizeof(schema_type) +
+					key.size() +
+					data.size();
 			}
 			template<typename>
 			constexpr auto fill(std::span<unsigned char> buffer) noexcept
@@ -326,8 +380,8 @@ namespace rdb
 				buffer[0] = char(qOp::Create);
 				std::size_t off = sizeof(qOp);
 				off += byte::swrite<schema_type>(buffer, off, Schema::ucode);
-				off += byte::swrite(buffer, off, key.first.data());
-				off += byte::swrite(buffer, off, key.second.data());
+				off += byte::swrite(buffer, off, key.data());
+				off += byte::swrite(buffer, off, data.data());
 				return off;
 			}
 		};
@@ -345,7 +399,7 @@ namespace rdb
 					sizeof(qOp) +
 					sizeof(schema_type) +
 					key.first.size() +
-					key.second.size();
+					key.second.size() + (sizeof(std::uint32_t) * !key.second.empty());
 			}
 			template<typename>
 			constexpr auto fill(std::span<unsigned char> buffer) noexcept
@@ -354,7 +408,11 @@ namespace rdb
 				std::size_t off = sizeof(qOp);
 				off += byte::swrite<schema_type>(buffer, off, Schema::ucode);
 				off += byte::swrite(buffer, off, key.first.data());
-				off += byte::swrite(buffer, off, key.second.data());
+				if (!key.second.empty())
+				{
+					off += byte::swrite<std::uint32_t>(buffer, off, key.second.size());
+					off += byte::swrite(buffer, off, key.second.data());
+				}
 				return off;
 			}
 		};
@@ -378,7 +436,7 @@ namespace rdb
 					sizeof(qOp) +
 					sizeof(schema_type) +
 					key.first.size() +
-					key.second.size();
+					key.second.size() + (sizeof(std::uint32_t) * !key.second.empty());;
 			}
 			template<typename>
 			constexpr auto fill(std::span<unsigned char> buffer) noexcept
@@ -387,7 +445,11 @@ namespace rdb
 				std::size_t off = sizeof(qOp);
 				off += byte::swrite<schema_type>(buffer, off, Schema::ucode);
 				off += byte::swrite(buffer, off, key.first.data());
-				off += byte::swrite(buffer, off, key.second.data());
+				if (!key.second.empty())
+				{
+					off += byte::swrite<std::uint32_t>(buffer, off, key.second.size());
+					off += byte::swrite(buffer, off, key.second.data());
+				}
 				return off;
 			}
 			template<typename>
@@ -575,7 +637,7 @@ namespace rdb
 			{
 				buffer[0] = char(qOp::Read);
 				buffer[1] = static_cast<std::uint8_t>(Schema::template index_of<Field>());
-				return size<Schema>();
+				return 2;
 			}
 			template<typename Schema>
 			constexpr auto eval(std::span<const unsigned char> buffer) const noexcept
@@ -636,6 +698,11 @@ namespace rdb
 		template<typename Schema, typename... Argv>
 		constexpr cmd::compound_key keyset(Argv&&... keys) noexcept
 		{
+			static_assert(
+				sizeof...(Argv) ==
+				(Schema::partition::fields + Schema::data::sort_count),
+				"Invalid argument for partition and sorting keys"
+			);
 			std::tuple args = std::forward_as_tuple(std::forward<Argv>(keys)...);
 			return {
 				[&args]<std::size_t... Idv>(std::index_sequence<Idv...>)
@@ -683,13 +750,16 @@ namespace rdb
 										>::value
 									)
 									{
-										return std::get<Schema::partition::fields + Idv>(args).size();
+										return std::get<Schema::partition::fields + Idv>(args).prefix_length();
 									}
 									else
 									{
-										return Schema::template interface<
+										using field = Schema::template field_type<
 											Schema::data::template sort<Idv>
-										>::mstorage(
+										>;
+										using interface = field::interface;
+										return interface::mpstorage(
+											field::order,
 											std::get<Schema::partition::fields + Idv>(args)
 										);
 									}
@@ -697,6 +767,10 @@ namespace rdb
 							);
 						std::size_t off = 0;
 						([&]() {
+							using field = Schema::template field_type<
+								Schema::data::template sort<Idv>
+							>;
+							using interface = field::interface;
 							if constexpr (
 								cmd::is_typed_view<
 									std::decay_t<
@@ -705,19 +779,16 @@ namespace rdb
 								>::value
 							)
 							{
-								off += byte::swrite(view.mutate(), off,
-									std::get<Schema::partition::fields + Idv>(args)
-								);
+								off += std::get<Schema::partition::fields + Idv>(
+									args
+								)->prefix(view.subview(off), field::order);
 							}
 							else
 							{
-								auto value = (Schema::template interface<
-									Schema::data::template sort<Idv>
-								>::make(
-									std::get<Schema::partition::fields + Idv>(args))
-								);
-								off += byte::swrite(view.mutate(), off,
-									value
+								off += interface::mpinline(
+									view.mutate().subspan(off),
+									field::order,
+									std::get<Schema::partition::fields + Idv>(args)
 								);
 							}
 						}(), ...);
@@ -793,11 +864,21 @@ namespace rdb
 	}
 
 	template<typename Schema, typename... Argv>
+	constexpr auto page_from(TableList<Schema>* out, std::size_t count, Argv&&... keys) noexcept
+	{
+		return cmd::PageFrom<Schema>{
+			.key = impl::keyset<Schema>(std::forward<Argv>(keys)...),
+			.out = out,
+			.count = count
+		};
+	}
+
+	template<typename Schema, typename... Argv>
 	constexpr auto create(Argv&&... args) noexcept
 	{
 		std::tuple targs = std::forward_as_tuple(std::forward<Argv>(args)...);
-		cmd::compound_key result{
-			[&targs]<std::size_t... Idv>(std::index_sequence<Idv...>)
+		return cmd::Create<Schema>{
+			.key = [&targs]<std::size_t... Idv>(std::index_sequence<Idv...>)
 			{
 				// return std::tuple_element_t<1, cmd::compound_key>::combine_views(
 				// 	[&]() {
@@ -823,32 +904,12 @@ namespace rdb
 					std::get<Idv>(targs)...
 				);
 			}(std::make_index_sequence<Schema::partition::fields>()),
-			[&targs]<std::size_t... Idv>(std::index_sequence<Idv...>)
+			.data = [&targs]<std::size_t... Idv>(std::index_sequence<Idv...>)
 			{
-				if constexpr (sizeof...(Idv) == 0)
-				{
-					return cmd::compound_key::second_type{};
-				}
-				else
-				{
-					cmd::compound_key::second_type view =
-						cmd::compound_key::second_type::copy(
-							Schema::mstorage(
-								std::get<Schema::partition::fields + Idv>
-									(targs)...
-							)
-						);
-					Schema::minline(
-						view.mutate(),
-						std::get<Schema::partition::fields + Idv>
-							(targs)...
-					);
-					return view;
-				}
+				return Schema::make(
+					std::get<Schema::partition::fields + Idv>(targs)...
+				);
 			}(std::make_index_sequence<Schema::data::fields>())
-		};
-		return cmd::Create<Schema>{
-			.key = std::move(result)
 		};
 	}
 

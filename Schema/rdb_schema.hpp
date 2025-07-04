@@ -107,9 +107,14 @@ namespace rdb
 
 	struct InterfaceProperty
 	{
-		static constexpr std::uint64_t trivial = 1 << 0;
-		static constexpr std::uint64_t dynamic = 1 << 1;
-		static constexpr std::uint64_t fragmented = 1 << 2;
+		enum : std::uint64_t
+		{
+			trivial = 1 << 0,
+			dynamic  = 1 << 1,
+			fragmented  = 1 << 2,
+			sortable = 1 << 3,
+			static_prefix  = 1 << 4,
+		};
 		std::uint64_t value{ trivial };
 
 		constexpr InterfaceProperty() = default;
@@ -227,7 +232,6 @@ namespace rdb
 		{
 			RuntimeInterfaceReflection::reg(ucode, RuntimeInterfaceReflection::RTII{
 				[]() { return uproperty.is(uproperty.dynamic); },
-				[]() { return alignof(Base); },
 				[](const void* ptr) { return static_cast<const Base*>(ptr)->storage(); },
 				[]() { return sizeof(Base); },
 				[](const void* ptr) { return static_cast<const Base*>(ptr)->hash(); },
@@ -258,6 +262,15 @@ namespace rdb
 				static_cast<Base*>(this)->storage()
 			));
 		}
+
+		View prefix(rdb::Order order) const noexcept
+		{
+			auto* base = static_cast<const Base*>(this);
+			const auto length = base->prefix_length();
+			View result = View::copy(length);
+			base->prefix(result, order);
+			return result;
+		}
 	};
 
 	template<cmp::ConstString Name, InterfaceType Inf, FieldType Type = FieldType::Data, Order Ordering = Order::Ascending>
@@ -274,10 +287,7 @@ namespace rdb
 	class Topology
 	{
 	public:
-		using value = AlignedTypedView<
-			Topology,
-			std::max({ alignof(Fields)... })
-		>;
+		using value = TypedView<Topology>;
 		static constexpr auto fields = sizeof...(Fields);
 	private:
 		template<typename Field, typename... Rest>
@@ -375,6 +385,15 @@ namespace rdb
 			(field_type<Key>::type == FieldType::Sort);
 		template<cmp::ConstString Field> static constexpr auto has =
 			!std::is_same_v<void, typename SearchField<Field>::type>;
+
+		static constexpr auto has_static_prefix =
+			(Fields::interface::uproperty.is(InterfaceProperty::static_prefix) && ...);
+		static constexpr auto static_prefix_length =
+			[]() -> std::size_t {
+				if constexpr (has_static_prefix)
+					return (Fields::interface::static_prefix_length() + ...);
+				return 0;
+			}();
 	private:
 		template<typename Func>
 		static constexpr void _for_each(Func&& callback, auto&&... args) noexcept
@@ -554,86 +573,6 @@ namespace rdb
 			(Fields::interface::require(), ...);
 		};
 	public:
-		static bool sort_keys_equal(View lhs, View rhs) noexcept
-		{
-			const auto* ldata = lhs.data().data();
-			const auto* rdata = rhs.data().data();
-			std::size_t off1 = 0;
-			std::size_t off2 = 0;
-
-			return ([&]() -> bool {
-				if constexpr (Fields::type == FieldType::Sort)
-				{
-					const auto* v1 = reinterpret_cast<const Fields::interface*>(ldata + off1);
-					const auto* v2 = reinterpret_cast<const Fields::interface*>(rdata + off2);
-					const auto v2p = View::view(std::span(rdata + off2, std::dynamic_extent));
-					if (v1->fproc(proc_opcode(SortFilterOp::Equal), v2p))
-						return true;
-					off1 += v1->storage();
-					off2 += v2->storage();
-					return false;
-				}
-				return true;
-			}() && ...);
-		}
-		static bool sort_keys_order(View lhs, View rhs) noexcept
-		{
-			const auto* ldata = lhs.data().data();
-			const auto* rdata = rhs.data().data();
-			std::size_t off1 = 0;
-			std::size_t off2 = 0;
-
-			return ([&]() -> bool {
-				if constexpr (Fields::type == FieldType::Sort)
-				{
-					const auto ordering = Fields::order;
-					const auto* v1 = reinterpret_cast<const Fields::interface*>(ldata + off1);
-					const auto* v2 = reinterpret_cast<const Fields::interface*>(rdata + off2);
-					const auto v2p = View::view(std::span(rdata + off2, std::dynamic_extent));
-					if (v1->fproc(proc_opcode(SortFilterOp::Smaller), v2p))
-						return ordering == Order::Ascending;
-					if (v1->fproc(proc_opcode(SortFilterOp::Larger), v2p))
-						return ordering != Order::Ascending;
-					off1 += v1->storage();
-					off2 += v2->storage();
-					return false;
-				}
-				return false;
-			}() || ...);
-		}
-		static int sort_keys_compare(View lhs, View rhs) noexcept
-		{
-			const auto* ldata = lhs.data().data();
-			const auto* rdata = rhs.data().data();
-			std::size_t off1 = 0;
-			std::size_t off2 = 0;
-			int result = 0;
-
-			([&]() -> bool {
-				if constexpr (Fields::type == FieldType::Sort)
-				{
-					const auto* v1 = reinterpret_cast<const Fields::interface*>(ldata + off1);
-					const auto* v2 = reinterpret_cast<const Fields::interface*>(rdata + off2);
-					const auto v2p = View::view(std::span(rdata + off2, std::dynamic_extent));
-					if (v1->fproc(proc_opcode(SortFilterOp::Smaller), v2p))
-					{
-						result = -1;
-						return true;
-					}
-					if (v1->fproc(proc_opcode(SortFilterOp::Larger), v2p))
-					{
-						result = 1;
-						return true;
-					}
-					off1 += v1->storage();
-					off2 += v2->storage();
-				}
-				return false;
-			}() || ...);
-
-			return result;
-		}
-
 		template<typename... Argv>
 		static constexpr auto make(Argv&&... args) noexcept
 		{
@@ -665,10 +604,7 @@ namespace rdb
 
 			return hash;
 		}
-		static constexpr std::size_t align() noexcept
-		{
-			return std::max({ alignof(Fields)... });
-		}
+
 		template<typename... Argv>
 		static constexpr auto mstorage(Argv&&... args) noexcept
 		{
@@ -710,6 +646,7 @@ namespace rdb
 			}
 			return off;
 		}
+
 		static constexpr auto mstorage_init_keys(View view) noexcept
 		{
 			std::size_t off = 0;
@@ -811,10 +748,11 @@ namespace rdb
 			std::size_t off = 0;
 			_for_each([&]<typename Field>() {
 				const auto* ptr = _at<interface<Field::cname>>(off);
+				constexpr auto is_sort = Field::type == FieldType::Sort;
 				out << "\n"
-					<< "\t'"
+					<< (is_sort ? "\t<" : "\t'")
 					<< Field::name
-					<< "' @"
+					<< (is_sort ? "> @" : "' @")
 					<< Field::interface::uname
 					<< ": "
 					<< ptr->print();
@@ -823,6 +761,32 @@ namespace rdb
 			out << "\n]";
 
 			return out.str();
+		}
+
+		std::size_t prefix_length() const noexcept
+		{
+			std::size_t off = 0;
+			std::size_t size = 0;
+			_for_each([&]<typename Field>() {
+				const auto* ptr = _at<typename Field::interface>(off);
+				if constexpr (Field::type == FieldType::Sort)
+					size += ptr->prefix_length(Field::order);
+				off += ptr->storage();
+			});
+			return size;
+		}
+		std::size_t prefix(View view) const noexcept
+		{
+			std::size_t off = 0;
+			std::size_t size = 0;
+			([&]() {
+				const auto* ptr = _at<typename Fields::interface>(off);
+				if constexpr (Fields::type == FieldType::Sort)
+					size += ptr->prefix(view.subview(size), Fields::order);
+				off += ptr->storage();
+				return size == view.size();
+			}() || ...);
+			return std::min(size, view.size());
 		}
 
 		std::size_t apply_field_write(std::size_t idx, View data, std::size_t buffer) noexcept
@@ -1042,7 +1006,6 @@ namespace rdb
 			RuntimeSchemaReflection::reg(ucode, RuntimeSchemaReflection::RTSI{
 				[](void* ptr, const View& sort) { Topology::minline_init_keys(std::span(static_cast<unsigned char*>(ptr), std::dynamic_extent), sort); },
 				[](const View& sort) { return Topology::mstorage_init_keys(sort); },
-				[]() { return Topology::align(); },
 				[](const void* ptr) { return static_cast<const Topology*>(ptr)->storage(); },
 
 				[](void* ptr, std::size_t i, const View& v, std::size_t b) { return static_cast<Topology*>(ptr)->apply_field_write(i, View::view(v), b); },
@@ -1070,9 +1033,11 @@ namespace rdb
 				[]() -> std::string { return Topology::show(); },
 				[]() -> std::string { return Partition::show(); },
 
-				[](const View& a, const View& b) -> bool { return Topology::sort_keys_equal(a, b); },
-				[](const View& a, const View& b) -> bool { return Topology::sort_keys_order(a, b); },
-				[](const View& a, const View& b) -> int { return Topology::sort_keys_compare(a, b); },
+
+				[]() -> bool { return Topology::has_static_prefix; },
+				[]() -> std::size_t { return Topology::static_prefix_length; },
+				[](const void* ptr) -> std::size_t { return static_cast<const Topology*>(ptr)->prefix_length(); },
+				[](const void* ptr, View v) -> std::size_t { return static_cast<const Topology*>(ptr)->prefix(v); },
 			});
 		}
 	};

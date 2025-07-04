@@ -36,23 +36,4 @@ namespace rdb
 			RDB_WARN("Overriding already existing schema information (either conflicting names or duplicate require expression)")
 		return (_schema_info[ucode] = std::move(info));
 	}
-
-	bool SortKeyComparator::operator()(const View& lhs, const View& rhs) const noexcept
-	{
-		RuntimeSchemaReflection::RTSI& info
-			= RuntimeSchemaReflection::info(schema);
-		return info.sort_key_order(lhs, rhs);
-	}
-	int ThreewaySortKeyComparator::operator()(const View& lhs, const View& rhs) const noexcept
-	{
-		RuntimeSchemaReflection::RTSI& info
-			= RuntimeSchemaReflection::info(schema);
-		return info.sort_key_compare(lhs, rhs);
-	}
-	std::pair<bool, std::size_t> EqualityKeyComparator::operator()(const View& lhs, const View& rhs) const noexcept
-	{
-		RuntimeSchemaReflection::RTSI& info
-			= RuntimeSchemaReflection::info(schema);
-		return { info.sort_key_equal(lhs, rhs), info.storage(rhs.data().data()) };
-	}
 }

@@ -170,7 +170,6 @@ namespace rdb
 		struct RTII
 		{
 			bool(*dynamic)();
-			std::size_t(*alignment)();
 			std::size_t(*storage)(const void*);
 			std::size_t(*sstorage)();
 			key_type(*hash)(const void*);
@@ -197,7 +196,6 @@ namespace rdb
 		{
 			void(*construct)(void*, const View&);
 			std::size_t(*cstorage)(const View&);
-			std::size_t(*alignment)();
 			std::size_t(*storage)(const void*);
 
 			std::size_t(*fwapply)(void*, std::size_t, const View&, std::size_t);
@@ -224,9 +222,10 @@ namespace rdb
 			std::string(*show_topology)();
 			std::string(*show_parition_topology)();
 
-			bool(*sort_key_equal)(const View&, const View&);
-			bool(*sort_key_order)(const View&, const View&);
-			int(*sort_key_compare)(const View&, const View&);
+			bool(*static_prefix)();
+			std::size_t(*sprefix_length)();
+			std::size_t(*prefix_length)(const void*);
+			std::size_t(*prefix)(const void*, View);
 		};
 	private:
 		static inline std::unordered_map<schema_type, RTSI> _schema_info{};
@@ -236,23 +235,6 @@ namespace rdb
 		static RTSI* fetch(schema_type version) noexcept;
 		static RTSI& info(schema_type version) noexcept;
 		static RTSI& reg(schema_type version, RTSI info) noexcept;
-	};
-
-	struct SortKeyComparator
-	{
-		schema_type schema{};
-		bool operator()(const View& lhs, const View& rhs) const noexcept;
-	};
-	struct ThreewaySortKeyComparator
-	{
-		schema_type schema{};
-		int operator()(const View& lhs, const View& rhs) const noexcept;
-	};
-	struct EqualityKeyComparator
-	{
-		schema_type schema{};
-		// Special case, expects full schema for rhs
-		std::pair<bool, std::size_t> operator()(const View& lhs, const View& rhs) const noexcept;
 	};
 }
 

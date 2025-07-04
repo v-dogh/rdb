@@ -26,7 +26,8 @@ namespace rdb
 			Sequential,
 			Random,
 			Hot,
-			Cold
+			Cold,
+				Huge
 		};
 		enum OpenMode : unsigned char
 		{

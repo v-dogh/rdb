@@ -303,7 +303,7 @@ namespace rdb::type
 		}
 		rproc_result rproc(proc_opcode opcode, const proc_param&) const noexcept
 		{
-
+			return nullptr;
 		}
 		bool fproc(proc_opcode opcode, const proc_param& arguments) const noexcept
 		{

@@ -26,13 +26,13 @@ namespace rdb
 		using WriteType = rdb::WriteType;
 		using ReadType = rdb::ReadType;
 	private:
-		enum class DataType : char
+		enum class DataType : unsigned char
 		{
 			FieldSequence,
 			SchemaInstance,
 			Tombstone
 		};
-		enum BloomType : char
+		enum BloomType : unsigned char
 		{
 			PK = 1 << 0,
 			PK_F = 1 << 1,
@@ -131,6 +131,13 @@ namespace rdb
 				ct::ordered_byte_map<Slot>::delete_node(slot);
 			}
 		};
+		struct PartitionMetadata
+		{
+			std::uint64_t version{};
+			std::uint64_t partition_sparse_index{};
+			std::uint64_t intra_partition_sparse_index{};
+			std::uint64_t block_size{};
+		};
 
 		using slot = Slot*;
 		using const_slot = const Slot*;
@@ -164,17 +171,24 @@ namespace rdb
 		Log _logs{};
 
 		std::size_t _cpu() const noexcept;
+		void _push_bytes(std::size_t) noexcept;
 
 		FlushHandle& _handle_open(std::size_t flush) const noexcept;
 		void _handle_reserve(bool ready = false) const noexcept;
 		void _handle_close_soft(std::size_t flush) const noexcept;
 		void _handle_close(std::size_t flush) const noexcept;
 
-		std::size_t _read_entry_size_impl(const View& view) noexcept;
-		std::size_t _read_entry_impl(const View& view, field_bitmap& fields, const read_callback* callback) noexcept;
+		std::optional<std::size_t> _disk_find_partition(key_type key, FlushHandle& handle) noexcept;
+		std::pair<std::size_t, MemoryCache::PartitionMetadata> _disk_read_partition_metadata(FlushHandle& handle) noexcept;
+
+		std::size_t _read_entry_size_impl(const View& view, DataType type) noexcept;
+		std::size_t _read_entry_impl(const View& view, DataType type, field_bitmap& fields, const read_callback* callback) noexcept;
 		std::size_t _read_cache_impl(write_store& map, key_type key, const View& sort, field_bitmap& fields, const read_callback* callback) noexcept;
 
 		bool _read_impl(key_type key, const View& sort, field_bitmap fields, const read_callback* callback) noexcept;
+
+		std::tuple<std::size_t, View, View> _page_map(write_store::iterator map, key_type key, const View& sort, std::size_t count) noexcept;
+		std::tuple<std::size_t, View, View> _page_disk(key_type key, const View& sort, std::size_t count, FlushHandle& handle) noexcept;
 
 		write_store::iterator _create_partition_log_if(write_store& map, key_type key, const View& partition) noexcept;
 		write_store::iterator _create_partition_if(write_store& map, key_type key, const View& partition) noexcept;
@@ -200,13 +214,24 @@ namespace rdb
 		void _reset_impl(write_store::iterator partition, const View& sort) noexcept;
 		void _remove_impl(write_store::iterator partition, const View& sort) noexcept;
 
-		bool _bloom_may_contain(key_type key, FlushHandle* handle) const noexcept;
-		std::size_t _bloom_bits(std::size_t keys) const noexcept;
+		bool _bloom_may_contain(key_type key, FlushHandle& handle) const noexcept;
+		bool _bloom_may_contain(key_type key, std::size_t off, FlushHandle& handle) const noexcept;
+		std::size_t _bloom_bits(std::size_t keys, float probability) const noexcept;
 		std::size_t _bloom_hashes(std::size_t bits, std::size_t keys) const noexcept;
 		std::pair<key_type, key_type> _hash_pair(key_type key) const noexcept;
 
-		void _bloom_impl(const write_store& data, const std::filesystem::path& base, int id) noexcept;
-		void _data_impl(const write_store& data, const std::filesystem::path& base, int id) noexcept;
+		void _bloom_impl(const write_store& map, Mapper& bloom, int id) noexcept;
+		void _bloom_round_impl(key_type key, unsigned char* buffer, std::size_t space, std::size_t bits) noexcept;
+
+		std::size_t _bloom_intra_partition_begin_impl(write_store::const_iterator partition, Mapper& bloom, int id) noexcept;
+		void _bloom_intra_partition_round_impl(write_store::const_iterator part, const View& key, std::size_t bits, Mapper& bloom, int id) noexcept;
+		void _bloom_intra_partition_end_impl(write_store::const_iterator partition, std::size_t bits, Mapper& bloom, int id) noexcept;
+		void _data_impl(const write_store& map, Mapper& data, Mapper& indexer, Mapper& bloom, int id) noexcept;
+
+		void _data_close_impl(Mapper& data) noexcept;
+		void _indexer_close_impl(Mapper& indexer) noexcept;
+		void _bloom_close_impl(Mapper& bloom) noexcept;
+
 		void _flush_impl(const write_store& data, int id) noexcept;
 		void _flush_if() noexcept;
 
@@ -219,10 +244,12 @@ namespace rdb
 			_move(std::move(copy));
 		}
 
+		std::size_t core() const noexcept;
 		std::size_t pressure() const noexcept;
 		std::size_t descriptors() const noexcept;
 
 		View page(key_type key, std::size_t count) noexcept;
+		View page_from(key_type key, const View& sort, std::size_t count) noexcept;
 		void read(key_type key, const View& sort, field_bitmap fields, const read_callback& callback) noexcept;
 		bool exists(key_type key, const View& sort) noexcept;
 

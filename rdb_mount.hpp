@@ -149,7 +149,7 @@ namespace rdb
 		void _resolve_query(query_log_id id) noexcept;
 		void _replay_queries() noexcept;
 
-		std::size_t _vcpu(std::uint32_t key) const noexcept;
+		std::size_t _vcpu(key_type key) const noexcept;
 		std::size_t _query_parse_operand(std::span<const unsigned char> packet, ParserState& state, ParserInfo info) noexcept;
 		std::size_t _query_parse_schema_operator(std::span<const unsigned char> packet, key_type key, View partition, View sort, schema_type schema, ParserState& state, ParserInfo& info) noexcept;
 		std::size_t _query_parse_predicate_operator(std::span<const unsigned char> packet, key_type key, View partition, View sort, schema_type schema, ParserState& state, ParserInfo& info) noexcept;
@@ -170,6 +170,9 @@ namespace rdb
 		{
 			stop();
 		}
+
+		const Config& cfg() const noexcept;
+		Config& cfg() noexcept;
 
 		std::size_t cores() const noexcept;
 

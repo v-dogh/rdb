@@ -92,60 +92,73 @@ namespace rdb
 			return machine;
 		}
 
-		uint128_t ugen(std::uint64_t machine) noexcept
+		uint128_t ugen_order_invert(uint128_t id) noexcept
+		{
+			return {
+				.low = ~id.low,
+				.high =
+					(~id.high & 0xFFFF000000000000ull) |
+					(id.high & 0x0000FFFFFFFFFFFFull)
+			};
+		}
+		uint128_t ugen_time(std::uint64_t machine, bool ascending) noexcept
 		{
 			using time_ratio = std::chrono::duration<int64_t, std::ratio<1, 10'000'000>>;
 
-			static std::atomic<std::uint16_t> idx = 0;
-			static std::atomic<std::chrono::system_clock::time_point::rep> prev{};
+			static std::atomic<std::int64_t> last{0};
+			static std::atomic<std::uint32_t> sequence{0};
 
 			uint128_t result;
-			auto view = result.view();
 
 			const auto time = std::chrono::duration_cast<time_ratio>(
 				std::chrono::system_clock::now().time_since_epoch()
 			).count();
-			const auto ptime = byte::byteswap_for_storage(time);
-			std::uint16_t clock = 0;
+
+			std::uint16_t clock_seq;
+
+			auto prev = last.load(std::memory_order::relaxed);
 			if (prev == time)
 			{
-				clock = idx.fetch_add(1, std::memory_order::relaxed);
+				clock_seq = static_cast<std::uint16_t>(sequence.fetch_add(1, std::memory_order::relaxed));
+				if (clock_seq == 0)
+				{
+					std::int64_t now;
+					do
+					{
+						now = std::chrono::duration_cast<time_ratio>(
+							std::chrono::system_clock::now().time_since_epoch()
+						).count();
+					} while (now == time);
+					last.store(now, std::memory_order::relaxed);
+				}
 			}
 			else
 			{
-				idx.store(1, std::memory_order::relaxed);
+				while (prev < time &&
+					   !last.compare_exchange_weak(prev, time, std::memory_order::relaxed));
+				sequence.store(1, std::memory_order::relaxed);
+				clock_seq = 0;
 			}
 
-			std::size_t off = 0;
+			// Byteswapped for big-endian (so it is trivially lexicographically comparable)
+
+			const auto clock = byte::byteswap_for_sort(clock_seq);
+			const auto ptime = byte::byteswap_for_sort(time);
 
 			// 64-bits - 8 bytes - time since epoch
 
-			view[off++] = static_cast<std::uint8_t>(ptime & 0xFF);
-			view[off++] = static_cast<std::uint8_t>((ptime >> 8) & 0xFF);
-			view[off++] = static_cast<std::uint8_t>((ptime >> 16) & 0xFF);
-			view[off++] = static_cast<std::uint8_t>((ptime >> 24) & 0xFF);
-			view[off++] = static_cast<std::uint8_t>((ptime >> 32) & 0xFF);
-			view[off++] = static_cast<std::uint8_t>((ptime >> 40) & 0xFF);
-			view[off++] = static_cast<std::uint8_t>((ptime >> 48) & 0xFF);
-			view[off++] = static_cast<std::uint8_t>((ptime >> 56) & 0xFF);
-
-			// 48-bits - 6 bytes - machine identifier (64-bits)
-
-			view[off++] = static_cast<std::uint8_t>(machine & 0xFF);
-			view[off++] = static_cast<std::uint8_t>((machine >> 8) & 0xFF) ^ static_cast<std::uint8_t>((machine >> 48) & 0xFF);
-			view[off++] = static_cast<std::uint8_t>((machine >> 16) & 0xFF);
-			view[off++] = static_cast<std::uint8_t>((machine >> 24) & 0xFF);
-			view[off++] = static_cast<std::uint8_t>((machine >> 32) & 0xFF);
-			view[off++] = static_cast<std::uint8_t>((machine >> 40) & 0xFF) ^ static_cast<std::uint8_t>((machine >> 56) & 0xFF);
+			result.low = ascending ? ptime : ~ptime;
 
 			// 16-bits - 2 bytes - clock sequence
+			// 48-bits - 6 bytes - machine identifier (64-bits) - truncated
 
-			view[off++] = static_cast<std::uint8_t>(clock & 0xFF);
-			view[off++] = static_cast<std::uint8_t>((clock >> 8) & 0xFF);
+			result.high =
+				(static_cast<std::uint64_t>(ascending ? clock : ~clock) << 48) |
+				(machine & 0x0000FFFFFFFFFFFFull);
 
 			return result;
 		}
-		uint128_t ugen() noexcept
+		uint128_t ugen_random() noexcept
 		{
 			uint128_t result;
 			getrandom(&result, sizeof(result), 0x00);

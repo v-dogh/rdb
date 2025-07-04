@@ -102,6 +102,11 @@ namespace rdb::ct
 				clear();
 			}
 
+			std::size_t size() const noexcept
+			{
+				return art_size(&_tree);
+			}
+
 			template<typename... Argv>
 			pointer insert(const_key key, Argv&&... args) noexcept
 			{
@@ -196,7 +201,7 @@ namespace rdb::ct
 			{
 				if (_tree.root != nullptr)
 				{
-					art_iter_prefix(&_tree, start.data(), +[](void* dat, const unsigned char* key, unsigned int len, void* value) -> int {
+					art_iter_prefix(&_tree, start.data(), start.size(), +[](void* dat, const unsigned char* key, unsigned int len, void* value) -> int {
 						return !(*static_cast<std::function<bool(const_key, const_pointer)>*>(dat))
 							(const_key(key, len),
 							 static_cast<const_pointer>(value));
@@ -207,7 +212,7 @@ namespace rdb::ct
 			{
 				if (_tree.root != nullptr)
 				{
-					art_iter_prefix(&_tree, start.data(), +[](void* dat, const unsigned char* key, unsigned int len, void* value) -> int {
+					art_iter_prefix(&_tree, start.data(), start.size(), +[](void* dat, const unsigned char* key, unsigned int len, void* value) -> int {
 						return !(*static_cast<std::function<bool(const_key, pointer)>*>(dat))
 							(const_key(key, len),
 							 static_cast<pointer>(value));

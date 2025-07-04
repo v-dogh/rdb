@@ -14,6 +14,15 @@
 
 namespace rdb
 {
+	const Config& Mount::cfg() const noexcept
+	{
+		return _cfg;
+	}
+	Config& Mount::cfg() noexcept
+	{
+		return _cfg;
+	}
+
 	std::size_t Mount::cores() const noexcept
 	{
 		return _threads.size();
@@ -24,7 +33,19 @@ namespace rdb
 		RDB_LOG("Attempting to start");
 		std::lock_guard lock(_mtx);
 		if (_status == Status::Running)
-			return;
+		{
+			RDB_LOG("Attempting to stop");
+			for (decltype(auto) it : _threads)
+			{
+				it.stop = true;
+				it.sem->release();
+				if (it.thread.joinable())
+					it.thread.join();
+			}
+			_threads.clear();
+			_status = Status::Stopped;
+			RDB_LOG("Attempting to restart");
+		}
 
 		std::filesystem::create_directory(_cfg.root);
 		if (!std::filesystem::exists(_cfg.root/"ntns"))
@@ -35,6 +56,8 @@ namespace rdb
 		{	
 			_threads[i].sem = Thread::make_sem();
 			_threads[i].thread = std::thread([this, i]() {
+				RDB_FMT("Starting core{}", i);
+
 				const auto path = _cfg.root/std::format("vcpu{}", i);
 				if (!std::filesystem::exists(path))
 				{
@@ -51,7 +74,7 @@ namespace rdb
 #					endif
 				}
 
-				std::unordered_map<schema_type, MemoryCache> schemas;
+				ct::hash_map<schema_type, MemoryCache> schemas;
 
 				// Replay all logs
 
@@ -229,7 +252,7 @@ namespace rdb
 			_shard_id = shards.back();
 	}
 
-	std::size_t Mount::_vcpu(std::uint32_t key) const noexcept
+	std::size_t Mount::_vcpu(key_type key) const noexcept
 	{
 		return key % _cfg.mnt.cores;
 	}
@@ -301,17 +324,10 @@ namespace rdb
 		// Get sort keys
 		if (info->skeys() &&
 			op == cmd::qOp::Fetch || op == cmd::qOp::Check ||
-			op == cmd::qOp::Remove)
+			op == cmd::qOp::Remove ||
+			op == cmd::qOp::PageFrom)
 		{
-			std::size_t size = 0;
-			for (std::size_t i = 0; i < info->skeys(); i++)
-			{
-				size += info->reflect_skey(i).storage(
-					packet.data() + off + size
-				);
-				if (size > packet.size())
-					return ~0ull;
-			}
+			const auto size = byte::sread<std::uint32_t>(packet, off);
 			sort = View::view(packet.subspan(off, size));
 			off += size;
 		}
@@ -374,7 +390,7 @@ namespace rdb
 				core.launch(Thread::task(schema, [=, &state, this](MemoryCache* cache) {
 					cache->write(
 						WriteType::Table,
-						key, sort, nullptr,
+						key, pkey, nullptr,
 						data
 					);
 					state.release();
@@ -389,16 +405,27 @@ namespace rdb
 				}));
 			}
 		}
-		else if (op == cmd::qOp::Page)
+		else if (op == cmd::qOp::PageFrom ||
+				 op == cmd::qOp::Page)
 		{
 			auto& core = _threads[_vcpu(key)];
 			const auto count = byte::sread<std::uint32_t>(packet, off);
 			state.acquire();
 			core.launch(Thread::task(schema, [=, &state, this](MemoryCache* cache) {
-				state.push(cache->page(key, count), ParserInfo{
-					.operand_idx = inf.operand_idx,
-					.operator_idx = 0
-				});
+				if (op == cmd::qOp::Page)
+				{
+					state.push(cache->page(key, count), ParserInfo{
+						.operand_idx = inf.operand_idx,
+						.operator_idx = 0
+					});
+				}
+				else if (op == cmd::qOp::PageFrom)
+				{
+					state.push(cache->page_from(key, sort, count), ParserInfo{
+						.operand_idx = inf.operand_idx,
+						.operator_idx = 0
+					});
+				}
 				state.release();
 			}));
 		}

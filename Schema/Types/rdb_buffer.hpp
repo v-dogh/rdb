@@ -13,10 +13,9 @@
 namespace rdb::type
 {
 	template<typename Type, bool Fragmented>
-	class alignas(std::max(alignof(Type), alignof(std::uint64_t)))
-		BufferBase :
-			public InterfaceMake<BufferBase<Type, Fragmented>>,
-			public InterfaceHelper<BufferBase<Type, Fragmented>>
+	class BufferBase :
+		public InterfaceMake<BufferBase<Type, Fragmented>>,
+		public InterfaceHelper<BufferBase<Type, Fragmented>>
 	{
 	private:
 		static constexpr auto _is_dynamic = Type::uproperty.is(Type::uproperty.dynamic);
@@ -43,6 +42,7 @@ namespace rdb::type
 		static constexpr auto _is_string =
 			_is_trivial_string ||
 			std::is_same_v<Type, Byte>;
+		static constexpr auto _sortable = Type::uproperty.is(Type::uproperty.sortable);
 		static constexpr auto _sbo_max =
 			(sizeof(std::uint64_t) * 2 - 1) / trivial_interface::storage;
 		static constexpr auto _volume_mask =
@@ -214,6 +214,19 @@ namespace rdb::type
 		{
 			return const_cast<Type*>(
 				const_cast<const BufferBase*>(this)->_at_impl(idx)
+			);
+		}
+
+		const Type* _at(std::size_t off) const noexcept
+		{
+			return reinterpret_cast<const Type*>(
+				reinterpret_cast<const unsigned char*>(this) + off
+			);
+		}
+		Type* _at(std::size_t off) noexcept
+		{
+			return reinterpret_cast<Type*>(
+				reinterpret_cast<unsigned char*>(this) + off
 			);
 		}
 	public:
@@ -527,6 +540,64 @@ namespace rdb::type
 			}
 		}
 
+		std::size_t prefix_length(rdb::Order order) const noexcept
+		{
+			if constexpr (_sortable)
+			{
+				if constexpr (_is_string)
+				{
+					return _size() * Type::static_storage();
+				}
+				else
+				{
+					std::size_t off = 0;
+					std::size_t len = 0;
+					for (std::size_t i = 0; i < _size(); i++)
+					{
+						const auto* ptr = _at(off);
+						len += ptr->prefix_length();
+						off += ptr->storage();
+					}
+					return len;
+				}
+			}
+			else
+				return 0;
+		}
+		std::size_t prefix(View buffer, rdb::Order order) const noexcept
+		{
+			if constexpr (_sortable)
+			{
+				if constexpr (_is_string)
+				{
+					const auto len = std::min(prefix_length(), buffer.size());
+					std::memcpy(buffer.data().data(), _buffer(), len);
+					return len;
+				}
+				else
+				{
+					std::size_t off = 0;
+					std::size_t len = 0;
+					for (std::size_t i = 0; i < _size(); i++)
+					{
+						const auto* ptr = _at(off);
+						len += ptr->prefix(
+							buffer.subview(len,
+								std::min(
+									ptr->prefix_length(),
+									buffer.size() - len
+								)
+							)
+						);
+						off += ptr->storage();
+					}
+					return std::min(buffer.size(), len);
+				}
+			}
+			else
+				return 0;
+		}
+
 		std::size_t storage() const noexcept
 		{
 			return _total_volume();
@@ -571,11 +642,11 @@ namespace rdb::type
 
 		wproc_query_result wproc(proc_opcode opcode, const proc_param& arguments, wproc_query query) noexcept
 		{
-
+			return wproc_type::Static;
 		}
 		rproc_result rproc(proc_opcode opcode, const proc_param&) const noexcept
 		{
-
+			return nullptr;
 		}
 		bool fproc(proc_opcode opcode, const proc_param& arguments) const noexcept
 		{
@@ -667,7 +738,8 @@ namespace rdb::type
 		public Interface<
 			Buffer<Type>,
 			cmp::concat_const_string<"buf<", Type::cuname, ">">(),
-			InterfaceProperty::dynamic
+			InterfaceProperty::dynamic |
+			(Type::uproperty.is(InterfaceProperty::sortable) ? InterfaceProperty::sortable : 0x00)
 		>
 	{ };
 

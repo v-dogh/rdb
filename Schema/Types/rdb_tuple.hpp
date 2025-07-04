@@ -8,15 +8,19 @@
 namespace rdb::type
 {
 	template<typename... Ts>
-	class alignas(std::max({ alignof(Ts)... })) Tuple :
+	class Tuple :
 		public InterfaceMake<Tuple<Ts...>>,
 		public Interface<
 			Tuple<Ts...>,
 			cmp::concat_const_string<"t<", Ts::cuname..., ">">(),
 			((Ts::uproperty.is(Ts::uproperty.dynamic) || ...) ? InterfaceProperty::dynamic : 0x00) |
-			((Ts::uproperty.is(Ts::uproperty.trivial) && ...) ? InterfaceProperty::trivial : 0x00)
+			((Ts::uproperty.is(Ts::uproperty.trivial) && ...) ? InterfaceProperty::trivial : 0x00) |
+			((Ts::uproperty.is(Ts::uproperty.static_prefix) && ...) ? InterfaceProperty::static_prefix : 0x00) |
+			((Ts::uproperty.is(Ts::uproperty.sortable) && ...) ? InterfaceProperty::sortable : 0x00)
 		>
 	{
+	private:
+		static constexpr auto _sortable = (Ts::uproperty.is(Ts::uproperty.sortable) && ...);
 	private:
 		template<typename Type>
 		const auto* _at(std::size_t off) const noexcept
@@ -234,6 +238,51 @@ namespace rdb::type
 		View field(std::size_t idx) noexcept
 		{
 			return _field_impl(idx, std::make_index_sequence<sizeof...(Ts)>());
+		}
+
+		std::size_t prefix_length(rdb::Order order) const noexcept
+		{
+			if constexpr (_sortable)
+			{
+				std::size_t off = 0;
+				std::size_t len = 0;
+				([&] {
+					len += _at<Ts>(off)->prefix_length(order);
+					off += _at<Ts>()->storage();
+				}(), ...);
+				return len;
+			}
+			else
+				return 0;
+		}
+		std::size_t prefix(View buffer, rdb::Order order) const noexcept
+		{
+			if constexpr (_sortable)
+			{
+				std::size_t off = 0;
+				std::size_t len = 0;
+				([&]{
+					const auto* ptr =_at<Ts>(off);
+					const auto clen = buffer.size() - len;
+					if (clen)
+					{
+						len += ptr->prefix(
+							buffer.subview(len,
+								std::min(
+									ptr->prefix_length(),
+									clen
+								)
+							)
+						);
+						off += ptr->storage();
+						return false;
+					}
+					return true;
+				}() || ...);
+				return std::min(buffer.size(), len);
+			}
+			else
+				return 0;
 		}
 
 		static constexpr std::size_t static_storage() noexcept

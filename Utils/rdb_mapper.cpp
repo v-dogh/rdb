@@ -303,6 +303,7 @@ namespace rdb
 				case Access::Random: flag = MADV_RANDOM; break;
 				case Access::Hot: flag = MADV_WILLNEED; break;
 				case Access::Cold: flag = MADV_DONTNEED; break;
+				case Access::Huge: flag = MADV_HUGEPAGE; break;
 			}
 			madvise(_memory, _length, flag);
 			_hint = acc;

@@ -63,6 +63,8 @@ add_executable(RDB main.cpp
 
     Network/rdb_network.hpp
     Network/rdb_oracle.hpp
+    Network/rdb_ctl.hpp
+    Network/rdb_ctl.cpp
 
     # Utilities
 
@@ -73,6 +75,7 @@ add_executable(RDB main.cpp
     Utils/rdb_mapper.hpp
     Utils/rdb_mapper.cpp
     Utils/rdb_locale.hpp
+    Utils/rdb_locale.cpp
     Utils/rdb_memunits.hpp
     Utils/rdb_dbg.hpp
 )

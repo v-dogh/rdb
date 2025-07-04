@@ -24,8 +24,20 @@ namespace rdb::type
 			return sizeof(ScalarBase);
 		}
 
+		static auto mpstorage(rdb::Order order, const Type& value = Type{}) noexcept
+		{
+			return sizeof(ScalarBase);
+		}
+		static auto mpinline(std::span<unsigned char> view, rdb::Order order, const Type& value = {}) noexcept
+		{
+			return ScalarBase(value).prefix(
+				View::view(view.subspan(0, sizeof(ScalarBase))),
+				order
+			);
+		}
+
 		ScalarBase() = default;
-		explicit ScalarBase(const Type& value)
+		ScalarBase(const Type& value)
 			: _value(byte::byteswap_for_storage(value)) {}
 
 		struct Op : InterfaceDeclProcPrimary<
@@ -68,6 +80,29 @@ namespace rdb::type
 				reinterpret_cast<const unsigned char*>(&_value),
 				sizeof(_value)
 			));
+		}
+
+		static constexpr std::size_t static_prefix_length() noexcept
+		{
+			return sizeof(ScalarBase);
+		}
+		std::size_t prefix_length(rdb::Order order) const noexcept
+		{
+			return sizeof(ScalarBase);
+		}
+		std::size_t prefix(View buffer, rdb::Order order) const noexcept
+		{
+			const auto value =
+				order == rdb::Order::Ascending ?
+					byte::byteswap_for_sort(_value) :
+					~byte::byteswap_for_sort(_value);
+			const auto len = std::min(sizeof(value), buffer.size());
+			std::memcpy(
+				buffer.mutate().data(),
+				&value,
+				len
+			);
+			return len;
 		}
 
 		static constexpr std::size_t static_storage() noexcept
@@ -122,7 +157,10 @@ namespace rdb::type
 	template<cmp::ConstString UniqueName, typename Type> requires std::is_trivial_v<Type>
 	class Scalar :
 		public ScalarBase<Scalar<UniqueName, Type>, Type>,
-		public Interface<Scalar<UniqueName, Type>, UniqueName>
+		public Interface<
+			Scalar<UniqueName, Type>, UniqueName,
+			InterfaceProperty::sortable | InterfaceProperty::trivial | InterfaceProperty::static_prefix
+		>
 	{ };
 
 	using Uint8 = Scalar<"u8", std::uint8_t>;
