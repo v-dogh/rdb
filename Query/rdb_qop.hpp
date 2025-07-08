@@ -5,19 +5,29 @@ namespace rdb::cmd
 {
 	enum class qOp : char
 	{
+		// Operands are specifically sequential (in values)
+		// So that they fit in lookup table for the query parser
+
 		// Operands
 
 		Fetch,
 		Create,
-		Reset,
 		Remove,
-		Write,
-		Read,
-		Dump,
-		WProc,
-		RProc,
 		Page,
 		PageFrom,
+
+		// Control flow
+
+		If,
+		Barrier,
+
+		// Fetch operators
+
+		Reset,
+		Write,
+		Read,
+		WProc,
+		RProc,
 
 		// Filter operands
 
@@ -27,7 +37,11 @@ namespace rdb::cmd
 		// Filters
 
 		FilterCompare,
-		FilterExists
+		FilterExists,
+
+		// Mutants
+
+		Invert,
 	};
 }
 

@@ -182,10 +182,10 @@ namespace rdb
 		std::pair<std::size_t, MemoryCache::PartitionMetadata> _disk_read_partition_metadata(FlushHandle& handle) noexcept;
 
 		std::size_t _read_entry_size_impl(const View& view, DataType type) noexcept;
-		std::size_t _read_entry_impl(const View& view, DataType type, field_bitmap& fields, const read_callback& callback) noexcept;
-		std::size_t _read_cache_impl(write_store& map, key_type key, const View& sort, field_bitmap& fields, const read_callback& callback) noexcept;
+		std::size_t _read_entry_impl(const View& view, DataType type, field_bitmap& fields, const read_callback* callback) noexcept;
+		std::size_t _read_cache_impl(write_store& map, key_type key, const View& sort, field_bitmap& fields, const read_callback* callback) noexcept;
 
-		bool _read_impl(key_type key, const View& sort, field_bitmap fields, const read_callback& callback) noexcept;
+		bool _read_impl(key_type key, const View& sort, field_bitmap fields, const read_callback* callback) noexcept;
 
 		std::tuple<std::size_t, View, View> _page_map(write_store::iterator map, key_type key, const View& sort, std::size_t count) noexcept;
 		std::tuple<std::size_t, View, View> _page_disk(key_type key, const View& sort, std::size_t count, FlushHandle& handle) noexcept;
@@ -250,7 +250,7 @@ namespace rdb
 
 		View page(key_type key, std::size_t count) noexcept;
 		View page_from(key_type key, const View& sort, std::size_t count) noexcept;
-		bool read(key_type key, const View& sort, field_bitmap fields, const read_callback& callback) noexcept;
+		void read(key_type key, const View& sort, field_bitmap fields, const read_callback& callback) noexcept;
 		bool exists(key_type key, const View& sort) noexcept;
 
 		void write(WriteType type, key_type key, const View& partition, const View& sort, std::span<const unsigned char> data) noexcept;

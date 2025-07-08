@@ -1,48 +1,6 @@
 #ifndef RDB_DSL_HPP
 #define RDB_DSL_HPP
 
-// RDB Streaming Language
-// Operands
-// -may be passed to operators with the pipe operator '|'
-// -allow for batched operations
-// <remove>
-// <fetch>
-// <create>
-// <remove>
-// <if>
-// <filter>
-// <check>
-// <last>
-// Operators
-// -perform the actual logic
-// -implicitly asynchronous
-// *Fetch
-// <write>
-// <read>
-// <dump>
-// <reset>
-// <wproc>
-// <rproc>
-// *Check
-// *Filter
-// <exists>
-// <is>
-// <not>
-// <and>
-// <or>
-// <fp> - run a filter procedure and evaluate the result
-// <fpn> - inverse of <fp>
-// Commands
-// -signal the interpreter
-// <atomic>
-// <execute>
-/*
-filter<schema>(partition)
-	| fpn<"A">(...)
-	| is<"A">(...)
-*/
-
-#include "rdb_dbg.hpp"
 #include <memory_resource>
 #include <functional>
 #include <future>
@@ -131,6 +89,11 @@ namespace rdb
 		{
 			return iterator(_data, true);
 		}
+
+		bool empty() const noexcept
+		{
+			return _data.empty();
+		}
 	};
 
 	namespace cmd
@@ -139,21 +102,62 @@ namespace rdb
 		struct PredicateTrait {};
 		struct FetchTrait {};
 		struct ExecuteTrait {};
-	}
-	namespace impl
-	{
-		template<typename, typename... Ops>
-		struct OperationChain
+		struct OperationChainTrait {};
+		struct ControlFlowTrait {};
+		struct FallbackTrait {};
+
+		struct ExtractNothing
 		{
+			constexpr auto extract() const noexcept
+			{
+				return nullptr;
+			}
+		};
+
+		template<qOp Op>
+		struct Operand
+		{
+			static constexpr auto op = Op;
+		};
+
+		template<qOp Op, typename... Traits>
+		struct Command : ExtractNothing, Operand<Op>, Traits...
+		{
+			template<typename>
+			using instantiate = Command;
+
+			constexpr auto size() const noexcept
+			{
+				return 0;
+			}
+			constexpr auto fill(std::span<unsigned char>) const noexcept
+			{
+				return 0;
+			}
+		};
+	}
+	namespace cmd
+	{
+		template<typename... Ops>
+		struct OperationChain :
+			OperationChainTrait,
+			std::conditional_t<std::is_base_of_v<ControlFlowTrait, std::tuple_element_t<0, std::tuple<Ops...>>>, ControlFlowTrait, FallbackTrait>
+		{
+			template<typename... Op> using append_ops = OperationChain<Ops..., Op...>;
+			template<typename... Op> using pre_append_ops = OperationChain<Op..., Ops...>;
+			template<typename Chain> using combine_chains = Chain::template pre_append_ops<Ops...>;
+
 			std::tuple<Ops...> ops;
+
 			constexpr OperationChain(Ops... ops) noexcept : ops(std::move(ops)...) {}
 			constexpr OperationChain(std::tuple<Ops...> ops) noexcept : ops(std::move(ops)) {}
+
 			constexpr auto extract() noexcept
 			{
 				auto tup = [&]<std::size_t... Idx>(std::index_sequence<Idx...>) {
 					return std::tuple_cat(
 						[&]() {
-							if constexpr (std::is_base_of_v<cmd::EvalTrait, Ops>)
+							if constexpr (std::is_base_of_v<EvalTrait, Ops>)
 								return std::tuple(std::move(std::get<Idx>(ops)));
 							else
 								return std::tuple<>();
@@ -172,8 +176,7 @@ namespace rdb
 						static std::array table = []<std::size_t... Idx>(std::index_sequence<Idx...>) {
 							return std::array{
 								+[](const sub& ops, std::span<const unsigned char> buffer) {
-									return std::get<Idx>(ops).template
-										eval<typename std::tuple_element_t<0, std::tuple<Ops...>>::schema>(buffer);
+									return std::get<Idx>(ops).eval(buffer);
 								}...
 							};
 						}(std::make_index_sequence<std::tuple_size_v<sub>>());
@@ -181,42 +184,26 @@ namespace rdb
 					};
 				}
 			}
-
-			template<typename Schema>
 			constexpr auto size() noexcept
 			{
 				return std::apply([](const auto&... ops) {
-					return (ops.template size<Schema>() + ...);
+					return
+						(ops.size() + ...) +
+						sizeof...(Ops) +
+						((sizeof(std::uint32_t) * std::is_base_of_v<ControlFlowTrait, Ops>) + ...);
 				}, ops);
 			}
-			template<typename Schema>
 			constexpr void fill(std::span<unsigned char> buffer) noexcept
 			{
 				std::apply([&](auto&... ops) {
 					std::size_t idx = 0;
-					([&](auto& op) {
-						idx += op.template fill<Schema>(buffer.subspan(idx));
+					([&]<typename Type>(Type& op) {
+						buffer[idx++] = char(Type::op);
+						if constexpr (std::is_base_of_v<ControlFlowTrait, Ops>)
+							idx += byte::swrite<std::uint32_t>(buffer, idx, size() - idx - sizeof(std::uint32_t));
+						idx += op.fill(buffer.subspan(idx));
 					}(ops), ...);
 				}, ops);
-			}
-		};
-
-		template<typename... Ops, typename Op>
-		constexpr auto operator|(OperationChain<Ops...> chain, Op next) noexcept
-		{
-			return OperationChain<Ops..., Op>(
-				std::tuple_cat(
-					std::move(chain.ops),
-					std::tuple{ next }
-				)
-			);
-		}
-
-		struct ExtractNothing
-		{
-			constexpr auto extract() noexcept
-			{
-				return nullptr;
 			}
 		};
 	}
@@ -232,31 +219,43 @@ namespace rdb
 
 		// Operands
 
+		template<typename First, typename... Ops, typename Op> requires std::is_base_of_v<FetchTrait, Op>
+		constexpr auto operator|(OperationChain<First, Ops...> chain, Op next) noexcept
+		{
+			using type = typename Op::template instantiate<typename First::schema>;
+			return OperationChain<First, Ops..., type>(
+				std::tuple_cat(
+					std::move(chain.ops),
+					std::forward_as_tuple(type(std::move(next)))
+				)
+			);
+		}
+
 		template<typename Schema>
-		struct Fetch
+		struct Fetch : Operand<qOp::Fetch>
 		{
 			using schema = Schema;
+
 			compound_key key{};
 
 			template<typename Op> requires std::is_base_of_v<FetchTrait, Op>
 			constexpr auto operator|(Op op) const noexcept
 			{
-				return impl::OperationChain<Schema, Fetch<Schema>, Op>(std::move(*this), op);
+				using type = typename Op::template instantiate<Schema>;
+				return cmd::OperationChain<Fetch<Schema>, type>(
+					std::move(*this), type(std::move(op))
+				);
 			}
-			template<typename>
 			constexpr auto size() const noexcept
 			{
 				return
-					sizeof(qOp) +
 					sizeof(schema_type) +
 					key.first.size() +
 					key.second.size() + (sizeof(std::uint32_t) * !key.second.empty());
 			}
-			template<typename>
 			constexpr auto fill(std::span<unsigned char> buffer) noexcept
 			{
-				buffer[0] = char(qOp::Fetch);
-				std::size_t off = sizeof(qOp);
+				std::size_t off = 0;
 				off += byte::swrite<schema_type>(buffer, off, Schema::ucode);
 				off += byte::swrite(buffer, off, key.first.data());
 				if (!key.second.empty())
@@ -269,9 +268,8 @@ namespace rdb
 		};
 
 		template<typename Schema>
-		struct Page : EvalTrait
+		struct Page : EvalTrait, Operand<qOp::Page>
 		{
-			using schema = Schema;
 			Schema::partition::value key{};
 			TableList<Schema>* out{ nullptr };
 			std::size_t count{ 0 };
@@ -282,27 +280,21 @@ namespace rdb
 					out->push(buffer);
 				};
 			}
-
-			template<typename>
 			constexpr auto size() const noexcept
 			{
 				return
-					sizeof(qOp) +
 					sizeof(schema_type) +
 					key.size() +
 					sizeof(std::uint32_t);
 			}
-			template<typename>
 			constexpr auto fill(std::span<unsigned char> buffer) noexcept
 			{
-				buffer[0] = char(qOp::Page);
-				std::size_t off = sizeof(qOp);
+				std::size_t off = 0;
 				off += byte::swrite<schema_type>(buffer, off, Schema::ucode);
 				off += byte::swrite(buffer, off, key.data());
 				off += byte::swrite(buffer, off, count);
 				return off;
 			}
-			template<typename>
 			constexpr auto eval(std::span<const unsigned char> buffer) const noexcept
 			{
 				out->push(buffer);
@@ -311,9 +303,8 @@ namespace rdb
 		};
 
 		template<typename Schema>
-		struct PageFrom : EvalTrait
+		struct PageFrom : EvalTrait, Operand<qOp::PageFrom>
 		{
-			using schema = Schema;
 			compound_key key{};
 			TableList<Schema>* out{ nullptr };
 			std::size_t count{ 0 };
@@ -324,22 +315,17 @@ namespace rdb
 					out->push(buffer);
 				};
 			}
-
-			template<typename>
 			constexpr auto size() const noexcept
 			{
 				return
-					sizeof(qOp) +
 					sizeof(schema_type) +
 					key.first.size() +
 					key.second.size() +
 					sizeof(std::uint32_t);
 			}
-			template<typename>
 			constexpr auto fill(std::span<unsigned char> buffer) noexcept
 			{
-				buffer[0] = char(qOp::PageFrom);
-				std::size_t off = sizeof(qOp);
+				std::size_t off = 0;
 				off += byte::swrite<schema_type>(buffer, off, Schema::ucode);
 				off += byte::swrite(buffer, off, key.first.data());
 				if (!key.second.empty())
@@ -350,7 +336,6 @@ namespace rdb
 				off += byte::swrite(buffer, off, count);
 				return off;
 			}
-			template<typename>
 			constexpr auto eval(std::span<const unsigned char> buffer) const noexcept
 			{
 				out->push(buffer);
@@ -359,26 +344,21 @@ namespace rdb
 		};
 
 		template<typename Schema>
-		struct Create : impl::ExtractNothing
+		struct Create : ExtractNothing, Operand<qOp::Create>
 		{
-			using schema = Schema;
 			Schema::partition::value key{};
 			Schema::data::value data{};
 
-			template<typename>
 			constexpr auto size() const noexcept
 			{
 				return
-					sizeof(qOp) +
 					sizeof(schema_type) +
 					key.size() +
 					data.size();
 			}
-			template<typename>
 			constexpr auto fill(std::span<unsigned char> buffer) noexcept
 			{
-				buffer[0] = char(qOp::Create);
-				std::size_t off = sizeof(qOp);
+				std::size_t off = 0;
 				off += byte::swrite<schema_type>(buffer, off, Schema::ucode);
 				off += byte::swrite(buffer, off, key.data());
 				off += byte::swrite(buffer, off, data.data());
@@ -387,25 +367,20 @@ namespace rdb
 		};
 
 		template<typename Schema>
-		struct Remove : impl::ExtractNothing
+		struct Remove : ExtractNothing, Operand<qOp::Remove>
 		{
-			using schema = Schema;
 			compound_key key{};
 
-			template<typename>
 			constexpr auto size() const noexcept
 			{
 				return
-					sizeof(qOp) +
 					sizeof(schema_type) +
 					key.first.size() +
 					key.second.size() + (sizeof(std::uint32_t) * !key.second.empty());
 			}
-			template<typename>
 			constexpr auto fill(std::span<unsigned char> buffer) noexcept
 			{
-				buffer[0] = char(qOp::Remove);
-				std::size_t off = sizeof(qOp);
+				std::size_t off = 0;
 				off += byte::swrite<schema_type>(buffer, off, Schema::ucode);
 				off += byte::swrite(buffer, off, key.first.data());
 				if (!key.second.empty())
@@ -418,31 +393,26 @@ namespace rdb
 		};
 
 		template<typename Schema>
-		struct Check : EvalTrait
+		struct Check : EvalTrait, Operand<qOp::Check>
 		{
-			using schema = Schema;
 			std::function<void(bool)> callback{};
 			compound_key key{};
 
 			template<typename Op> requires std::is_base_of_v<PredicateTrait, Op>
 			constexpr auto operator<(Op op) const noexcept
 			{
-				return impl::OperationChain<Schema, Check<Schema>, Op>(std::move(*this), op);
+				return cmd::OperationChain<Check<Schema>, Op>(std::move(*this), op);
 			}
-			template<typename>
 			constexpr auto size() const noexcept
 			{
 				return
-					sizeof(qOp) +
 					sizeof(schema_type) +
 					key.first.size() +
 					key.second.size() + (sizeof(std::uint32_t) * !key.second.empty());;
 			}
-			template<typename>
 			constexpr auto fill(std::span<unsigned char> buffer) noexcept
 			{
-				buffer[0] = char(qOp::Check);
-				std::size_t off = sizeof(qOp);
+				std::size_t off = 0;
 				off += byte::swrite<schema_type>(buffer, off, Schema::ucode);
 				off += byte::swrite(buffer, off, key.first.data());
 				if (!key.second.empty())
@@ -452,7 +422,6 @@ namespace rdb
 				}
 				return off;
 			}
-			template<typename>
 			constexpr auto eval(std::span<const unsigned char> buffer) const noexcept
 			{
 				callback(buffer[0]);
@@ -460,52 +429,68 @@ namespace rdb
 			}
 		};
 
-		// Operators
+		// Conditionals
 
-		struct Reset : FetchTrait
+		using If = Command<qOp::If, ControlFlowTrait>;
+
+		// Mutants
+
+		template<typename Op>
+		struct Invert : Op/*, Operand<qOp::Invert>*/
 		{
-			template<typename>
+			static constexpr auto op = qOp::Invert;
+
 			constexpr auto size() const noexcept
 			{
-				return sizeof(qOp);
+				return Op::size() + sizeof(qOp);
 			}
-			template<typename>
 			constexpr auto fill(std::span<unsigned char> buffer) noexcept
 			{
-				buffer[0] = char(qOp::Reset);
-				return sizeof(qOp);
+				buffer[0] = char(Op::op);
+				return Op::fill(buffer.subspan(1)) + 1;
 			}
 		};
+
+		// Operators
+
+		using Reset = Command<qOp::Reset, FetchTrait>;
+
+		template<typename Schema, cmp::ConstString Field, typename... Argv>
+		struct WriteImpl;
 
 		template<cmp::ConstString Field, typename... Argv>
 		struct Write : FetchTrait
 		{
-			static constexpr auto field = *Field;
-			std::tuple<Argv...> data;
-
 			template<typename Schema>
+			using instantiate = WriteImpl<Schema, Field, Argv...>;
+
+			std::tuple<Argv...> data;
+		};
+
+		template<typename Schema, cmp::ConstString Field, typename... Argv>
+		struct WriteImpl : Write<Field, Argv...>, Operand<qOp::Write>
+		{
+			static constexpr auto field = *Field;
+
 			constexpr auto size() const noexcept
 			{
 				static_assert(Schema::data::template has<Field>, "Cannot write to a key field");
 				return
-					sizeof(qOp) +
 					sizeof(std::uint8_t) +
 					sizeof(std::uint32_t) +
 					std::apply([](auto&&... args) {
 						return Schema::
 							template interface<Field>::mstorage(args...);
-					}, data);
+					}, this->data);
 			}
-			template<typename Schema>
 			constexpr auto fill(std::span<unsigned char> buffer) noexcept
 			{
-				buffer[0] = char(qOp::Write);
-				std::size_t off = sizeof(qOp);
+				std::size_t off = 0;
 				off += byte::swrite<std::uint32_t>(buffer, off,
 					std::apply([](auto&&... args) {
 						return Schema::
 							template interface<Field>::mstorage(args...);
-					}, data)
+					}, this->data)
 				);
 				buffer[off++] = static_cast<std::uint8_t>(Schema::template index_of<Field>());
 				off +=
@@ -514,87 +499,113 @@ namespace rdb
 							buffer.subspan(off),
 							std::forward<Argv>(args)...
 						);
-					}, data);
+					}, this->data);
 				return off;
 			}
 		};
+
+		template<typename Schema, cmp::ConstString Field, typename Type>
+		struct WriteViewImpl;
 
 		template<cmp::ConstString Field, typename Type>
 		struct WriteView : FetchTrait
 		{
-			static constexpr auto field = *Field;
-			Type data;
-
 			template<typename Schema>
+			using instantiate = WriteViewImpl<Schema, Field, Type>;
+
+			Type data;
+		};
+
+		template<typename Schema, cmp::ConstString Field, typename Type>
+		struct WriteViewImpl : WriteView<Field, Type>, Operand<qOp::Write>
+		{
+			static constexpr auto field = *Field;
+
 			constexpr auto size() const noexcept
 			{
 				static_assert(Schema::data::template has<Field>, "Cannot write to a key field");
 				return
-					sizeof(qOp) +
 					sizeof(std::uint8_t) +
 					sizeof(std::uint32_t) +
-					data.size();
+					this->data.size();
 			}
-			template<typename Schema>
 			constexpr auto fill(std::span<unsigned char> buffer) noexcept
 			{
-				buffer[0] = char(qOp::Write);
-				buffer[1] = static_cast<std::uint8_t>(Schema::template index_of<Field>());
-				std::size_t off = sizeof(qOp) + sizeof(std::uint8_t);
-				off += byte::swrite<std::uint32_t>(buffer, off, data.size());
-				off += byte::swrite(buffer, off, data);
+				std::size_t off = 0;
+				buffer[off++] = static_cast<std::uint8_t>(Schema::template index_of<Field>());
+				off += byte::swrite<std::uint32_t>(buffer, off, this->data.size());
+				off += byte::swrite(buffer, off, this->data);
 				return off;
 			}
 		};
+
+		template<typename Schema, cmp::ConstString Field, char Op, typename... Argv>
+		struct WProcImpl;
 
 		template<cmp::ConstString Field, char Op, typename... Argv>
 		struct WProc : FetchTrait
 		{
-			static constexpr auto field = *Field;
-			std::tuple<Argv...> data;
-
 			template<typename Schema>
+			using instantiate = WProcImpl<Schema, Field, Op, Argv...>;
+
+			std::tuple<Argv...> data;
+		};
+
+		template<typename Schema, cmp::ConstString Field, char Op, typename... Argv>
+		struct WProcImpl : WProc<Field, Op, Argv...>, Operand<qOp::WProc>
+		{
+			using type = Schema::template interface<Field>;
+			using wtype = type::Op::template wtype<proc_opcode(Op)>;
+
+			static constexpr auto field = *Field;
+
 			constexpr auto size() const noexcept
 			{
 				static_assert(Schema::data::template has<Field>, "Cannot write to a key field");
 				return
-					sizeof(qOp) +
 					sizeof(std::uint8_t) +
-					sizeof(char) +
+					sizeof(proc_opcode) +
 					sizeof(std::uint32_t) +
 					std::apply([](const auto&... args) {
-						return  Schema::template interface<Field>::mstorage(args...);
-					}, data);
+						return wtype::mstorage(args...);
+					}, this->data);
 			}
-			template<typename Schema>
 			constexpr auto fill(std::span<unsigned char> buffer) noexcept
 			{
-				buffer[0] = char(qOp::WProc);
-				std::size_t off = sizeof(qOp);
+				std::size_t off = 0;
 				off += byte::swrite<std::uint32_t>(buffer, off,
 					std::apply([&](const auto&... args) {
-						return Schema::template interface<Field>::mstorage(args...);
-					}, data)
+						return wtype::mstorage(args...);
+					}, this->data)
 				);
 				buffer[off++] = static_cast<std::uint8_t>(Schema::template index_of<Field>());
 				buffer[off++] = static_cast<unsigned char>(Op);
-				using type = Schema::template interface<Field>;
 				std::apply([&](auto&&... args) {
-					off += type::template WritePair<typename type::wOp(Op)>::param::minline(
+					off += wtype::minline(
 						buffer.subspan(off), std::forward<Argv>(args)...
 					);
-				}, data);
+				}, this->data);
 				return off;
 			}
 		};
+
+		template<typename Schema, cmp::ConstString Field, char Op, typename Type>
+		struct WProcViewImpl;
 
 		template<cmp::ConstString Field, char Op, typename Type>
 		struct WProcView : FetchTrait
 		{
-			static constexpr auto field = *Field;
-			Type data;
-
 			template<typename Schema>
+			using instantiate = WProcViewImpl<Schema, Field, Op, Type>;
+
+			Type data;
+		};
+
+		template<typename Schema, cmp::ConstString Field, char Op, typename Type>
+		struct WProcViewImpl : WProcView<Field, Op, Type>, Operand<qOp::WProc>
+		{
+			static constexpr auto field = *Field;
+
 			constexpr auto size() const noexcept
 			{
 				static_assert(Schema::data::template has<Field>, "Cannot write to a key field");
@@ -603,43 +614,47 @@ namespace rdb
 					sizeof(std::uint8_t) +
 					sizeof(char) +
 					sizeof(std::uint32_t) +
-					data.size();
+					this->data.size();
 			}
-			template<typename Schema>
 			constexpr auto fill(std::span<unsigned char> buffer) noexcept
 			{
 				buffer[0] = char(qOp::WProc);
 				std::size_t off = sizeof(qOp);
-				off += byte::swrite<std::uint32_t>(buffer, off, data.size());
+				off += byte::swrite<std::uint32_t>(buffer, off, this->data.size());
 				buffer[off++] = static_cast<std::uint8_t>(Schema::template index_of<Field>());
 				buffer[off++] = static_cast<unsigned char>(Op);
 				using type = Schema::template interface<Field>;
-				off += byte::swrite(buffer, off, data);
+				off += byte::swrite(buffer, off, this->data);
 				return off;
 			}
 		};
 
+		template<typename Schema, cmp::ConstString Field>
+		struct ReadImpl;
+
 		template<cmp::ConstString Field>
 		struct Read : FetchTrait, EvalTrait
 		{
-			static constexpr auto field = *Field;
-			std::function<void(View)> callback;
-
 			template<typename Schema>
+			using instantiate = ReadImpl<Schema, Field>;
+
+			std::function<void(View)> callback;
+		};
+
+		template<typename Schema, cmp::ConstString Field>
+		struct ReadImpl : Read<Field>, Operand<qOp::Read>
+		{
+			static constexpr auto field = *Field;
+
 			constexpr auto size() const noexcept
 			{
-				return
-					sizeof(qOp) +
-					sizeof(std::uint8_t);
+				return sizeof(std::uint8_t);
 			}
-			template<typename Schema>
 			constexpr auto fill(std::span<unsigned char> buffer) noexcept
 			{
-				buffer[0] = char(qOp::Read);
-				buffer[1] = static_cast<std::uint8_t>(Schema::template index_of<Field>());
-				return 2;
+				buffer[0] = static_cast<std::uint8_t>(Schema::template index_of<Field>());
+				return 1;
 			}
-			template<typename Schema>
 			constexpr auto eval(std::span<const unsigned char> buffer) const noexcept
 			{
 				RuntimeSchemaReflection::RTSI& info =
@@ -647,34 +662,14 @@ namespace rdb
 				const auto off = info.reflect(
 					Schema::template index_of<Field>()
 				).storage(buffer.data());
-				callback(buffer.empty() ? nullptr : View::view(buffer.subspan(0, off)));
+				this->callback(buffer.empty() ? nullptr : View::view(buffer.subspan(0, off)));
 				return off;
 			}
 		};
 
-		template<cmp::ConstString Field, typename Type>
-		struct Dump : FetchTrait, EvalTrait
-		{
-			static constexpr auto field = *Field;
-			Type func{};
-		};
-
 		// Filters
 
-		struct Exists : PredicateTrait
-		{
-			template<typename>
-			constexpr auto size() const noexcept
-			{
-				return sizeof(qOp);
-			}
-			template<typename>
-			constexpr auto fill(std::span<unsigned char> buffer) noexcept
-			{
-				buffer[0] = char(qOp::FilterExists);
-				return sizeof(qOp);
-			}
-		};
+		using Exists = Command<qOp::FilterExists, PredicateTrait>;
 
 		// Commands
 
@@ -692,8 +687,10 @@ namespace rdb
 		};
 
 		struct Flush {};
+
+		using Barrier = Command<qOp::Barrier>;
 	}
-	namespace impl
+	namespace cmd
 	{
 		template<typename Schema, typename... Argv>
 		constexpr cmd::compound_key keyset(Argv&&... keys) noexcept
@@ -798,23 +795,15 @@ namespace rdb
 			};
 		}
 
-		template<
-			template<typename, typename...> typename Operand,
-			typename Schema,
-			typename... Ops
-		>
-		constexpr auto size(Operand<Schema, Ops...>& chain) noexcept
+		template<typename Operand>
+		constexpr auto size(Operand&& chain) noexcept
 		{
-			return chain.template size<Schema>();
+			return chain.size();
 		}
-		template<
-			template<typename, typename...> typename Operand,
-			typename Schema,
-			typename... Ops
-		>
-		constexpr void fill(Operand<Schema, Ops...>& chain, std::span<unsigned char> buffer) noexcept
+		template<typename Operand>
+		constexpr void fill(Operand&& chain, std::span<unsigned char> buffer) noexcept
 		{
-			chain.template fill<Schema>(buffer);
+			chain.fill(buffer);
 		}
 	}
 
@@ -829,6 +818,8 @@ namespace rdb
 	template<auto... Opts>
 	constexpr auto execute = cmd::Execute<static_cast<unsigned char>(Opts)...>();
 
+	constexpr auto barrier = cmd::Barrier();
+
 	template<auto... Opts>
 	constexpr auto execute_checked(bool* out = nullptr) noexcept
 	{
@@ -841,16 +832,16 @@ namespace rdb
 	constexpr auto remove(Argv&&... keys) noexcept
 	{
 		return cmd::Remove<Schema>{
-			.key = impl::keyset<Schema>(std::forward<Argv>(keys)...)
+			.key = cmd::keyset<Schema>(std::forward<Argv>(keys)...)
 		};
 	}
 
 	template<typename Schema, typename... Argv>
 	constexpr auto fetch(Argv&&... keys) noexcept
 	{
-		return cmd::Fetch<Schema>(
-			impl::keyset<Schema>(std::forward<Argv>(keys)...)
-		);
+		return cmd::Fetch<Schema>{
+			.key = cmd::keyset<Schema>(std::forward<Argv>(keys)...)
+		};
 	}
 
 	template<typename Schema, typename... Argv>
@@ -867,7 +858,7 @@ namespace rdb
 	constexpr auto page_from(TableList<Schema>* out, std::size_t count, Argv&&... keys) noexcept
 	{
 		return cmd::PageFrom<Schema>{
-			.key = impl::keyset<Schema>(std::forward<Argv>(keys)...),
+			.key = cmd::keyset<Schema>(std::forward<Argv>(keys)...),
 			.out = out,
 			.count = count
 		};
@@ -968,22 +959,6 @@ namespace rdb
 		}};
 	}
 
-	template<cmp::ConstString Field, typename Value>
-	constexpr auto dump(Value* ptr) noexcept
-	{
-		auto func = [ptr](const auto& value) {
-			*ptr = value;
-		};
-		using type = std::remove_cvref_t<decltype(func)>;
-		return cmd::Dump<Field, type>(std::move(func));
-	}
-
-	template<cmp::ConstString Field, typename Func>
-	constexpr auto dump(Func&& func) noexcept
-	{
-		return cmd::Dump<Field, Func>(std::forward<Func>(func));
-	}
-
 	// Filters
 
 	template<typename Schema, typename... Argv>
@@ -994,7 +969,7 @@ namespace rdb
 		};
 		return cmd::Check<Schema>{
 			.callback = func,
-			.key = impl::keyset<Schema>(std::forward<Argv>(keys)...)
+			.key = cmd::keyset<Schema>(std::forward<Argv>(keys)...)
 		};
 	}
 
@@ -1003,13 +978,40 @@ namespace rdb
 	{
 		return cmd::Check<Schema>{
 			.callback = std::forward<Func>(func),
-			.key = impl::keyset<Schema>(std::forward<Argv>(keys)...)
+			.key = cmd::keyset<Schema>(std::forward<Argv>(keys)...)
 		};
 	}
 
 	// Predicates
 
 	constexpr auto exists = cmd::Exists();
+
+	// Control flow
+
+	template<typename Cond, typename Schema, typename... Expr>
+	constexpr auto pred(cmd::OperationChain<cmd::Check<Schema>, Cond> condition, Expr... ops) noexcept
+	{
+		return cmd::OperationChain(
+				std::tuple_cat(
+					std::forward_as_tuple(cmd::If()),
+					std::move(condition.ops),
+					[&]() {
+						if constexpr (std::is_base_of_v<cmd::OperationChainTrait, Expr>)
+							return std::move(ops.ops);
+						else
+							return std::forward_as_tuple(std::move(ops));
+					}()...
+				)
+			);
+	}
+
+	// Mutants
+
+	template<typename Op>
+	constexpr auto invert(Op op) noexcept
+	{
+		return cmd::Invert<Op>(std::move(op));
+	}
 
 	//
 	//
@@ -1140,30 +1142,49 @@ namespace rdb
 			}
 			else
 			{
+				using type = std::remove_cvref_t<Type>;
+
+				constexpr auto skip_op = std::is_base_of_v<cmd::OperationChainTrait, type>;
+				constexpr auto skip_size = !std::is_base_of_v<cmd::ControlFlowTrait, type> || skip_op;
+
 				// Writes
 
 				_sync();
-				const auto size = impl::size(cmd) + 1;
+				const auto base_size = cmd::size(cmd);
+				const auto size = base_size +
+					sizeof(OperandFlags) +
+					sizeof(cmd::qOp) * !skip_op +
+					sizeof(std::uint32_t) * !skip_size;
 				const auto buffer = _qbuffer(size);
 
-				// Reads
+				// Metadata
+
+				std::size_t off = 0;
 
 				auto r = cmd.extract();
 				if constexpr (!std::is_same_v<std::remove_cvref_t<decltype(r)>, std::nullptr_t>)
 				{
-					buffer[0] = OperandFlags::Reads;
+					buffer[off++] = OperandFlags::Reads;
 					_build_store(std::move(r));
 				}
 				else
 				{
-					buffer[0] = 0x00;
+					buffer[off++] = 0x00;
+				}
+				if constexpr (!skip_op)
+				{
+					buffer[off++] = char(type::op);
+				}
+				if constexpr (!skip_size)
+				{
+					off += byte::swrite<std::uint32_t>(buffer, off, base_size);
 				}
 
 				// Instructions
 
-				impl::fill(cmd,
+				cmd::fill(cmd,
 					std::span(
-						buffer.begin() + 1,
+						buffer.begin() + off,
 						buffer.end()
 					)
 				);

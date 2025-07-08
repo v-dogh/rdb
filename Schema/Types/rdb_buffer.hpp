@@ -50,9 +50,9 @@ namespace rdb::type
 				~std::uint64_t(0) >> 1
 			);
 		static constexpr auto _sbo_tag =
-			std::uint8_t(0b00000001);
+			std::uint8_t(0b10000000);
 		static constexpr auto _sbo_mask =
-			std::uint8_t(0b11111110);
+			std::uint8_t(0b01111111);
 
 		union
 		{
@@ -238,8 +238,7 @@ namespace rdb::type
 			return s;
 		}
 
-		static auto minline(std::span<unsigned char> view, const std::basic_string<trivial_type>& str) noexcept
-			requires _is_string
+		static auto minline(std::span<unsigned char> view, const std::basic_string<trivial_type>& str) noexcept requires _is_string
 		{
 			return minline(view, std::basic_string_view<trivial_type>(str));
 		}
@@ -291,18 +290,15 @@ namespace rdb::type
 			}
 		}
 
-		static auto mstorage(const std::basic_string<trivial_type>& value)
-			requires _is_string
+		static auto mstorage(const std::basic_string<trivial_type>& value) requires _is_string
 		{
 			return mstorage(Reserve(value.size()));
 		}
-		static auto mstorage(std::basic_string_view<trivial_type> value)
-			requires _is_string
+		static auto mstorage(std::basic_string_view<trivial_type> value) requires _is_string
 		{
 			return mstorage(Reserve(value.size()));
 		}
-		static auto mstorage(const trivial_type* ptr)
-			requires _is_string
+		static auto mstorage(const trivial_type* ptr) requires _is_string
 		{
 			return mstorage(
 				std::basic_string_view<
@@ -310,8 +306,7 @@ namespace rdb::type
 				>(ptr)
 			);
 		}
-		static auto mstorage(trivial_list str)
-			requires _is_trivial
+		static auto mstorage(trivial_list str) requires _is_trivial
 		{
 			return mstorage(
 				std::basic_string_view<
@@ -351,6 +346,61 @@ namespace rdb::type
 			}
 		}
 
+		template<typename... Argv>
+		static auto mpinline(std::span<unsigned char> view, rdb::Order order, Argv&&... args) noexcept requires _sortable
+		{
+			static_assert("Not implemented");
+		}
+
+		static auto mpinline(std::span<unsigned char> view, rdb::Order order, std::basic_string_view<trivial_type> str) noexcept requires _is_string && _sortable
+		{
+			std::memcpy(view.data(), str.data(), str.size() * sizeof(Type));
+			return str.size() * sizeof(Type);
+		}
+		static auto mpinline(std::span<unsigned char> view, rdb::Order order, const std::basic_string<trivial_type>& str) noexcept requires _is_string && _sortable
+		{
+			return mpinline(view, order, std::basic_string_view<trivial_type>(str.begin(), str.end()));
+		}
+
+		static auto mpstorage(rdb::Order order, view_list cpy) noexcept requires _sortable
+		{
+			return std::accumulate(
+				cpy.begin(),
+				cpy.end(),
+				std::size_t{ 0 },
+				[&](std::size_t ctr, const auto& value) {
+					return ctr + value->prefix_length(order);
+				}
+			);
+		}
+		static auto mpstorage(rdb::Order order, list cpy) noexcept requires _sortable
+		{
+			return mpstorage(view_list(cpy.begin(), cpy.end()));
+		}
+
+		static auto mpstorage(rdb::Order order, const std::basic_string<trivial_type>& value) requires _is_string && _sortable
+		{
+			return value.size() * sizeof(Type);
+		}
+		static auto mpstorage(rdb::Order order, std::basic_string_view<trivial_type> value) requires _is_string && _sortable
+		{
+			return value.size() * sizeof(Type);
+		}
+		static auto mpstorage(rdb::Order order, const trivial_type* ptr) requires _is_string && _sortable
+		{
+			return std::basic_string_view<trivial_type>(ptr).size() * Type::mpstorage(order);
+		}
+		static auto mpstorage(rdb::Order order, trivial_list str) requires _is_trivial && _sortable
+		{
+			return str.size() * Type::mpstorage(order);
+		}
+
+		template<typename... Argv>
+		static auto mpstorage(rdb::Order order, const Argv&... args) noexcept requires _sortable
+		{
+			return (Type::mpstorage(args, order) + ...);
+		}
+
 		BufferBase()
 		{
 			_set_dims(0, 0);
@@ -362,7 +412,7 @@ namespace rdb::type
 				!std::is_same_v<std::decay_t<Arg>, list> &&
 				!std::is_same_v<std::decay_t<Arg>, view_list> &&
 				!std::is_same_v<std::decay_t<Arg>, const trivial_type*> &&
-				!std::is_same_v<std::decay_t<Arg>, std::basic_string_view<trivial_type>>,
+				!std::is_same_v<std::decay_t<Arg>, std::basic_string_view<trivial_type>> &&
 				!std::is_same_v<std::decay_t<Arg>, trivial_list>
 			)
 		{
@@ -430,9 +480,12 @@ namespace rdb::type
 
 		struct Op : InterfaceDeclProcPrimary<
 			DeclWrite<
+				Type,
+				void,
+				Uint64,
+				Tuple<Type, Character>,
 				Tuple<Uint64, BufferBase>,
-				Tuple<Uint64, Type>,
-				Tuple<Uint64, BufferBase>
+				Tuple<Uint64, Type>
 			>,
 			DeclFilter<
 				BufferBase, BufferBase, BufferBase
@@ -440,20 +493,25 @@ namespace rdb::type
 			DeclRead<
 				ReadPair<Tuple<Uint64, Uint64>, BufferBase>,
 				ReadPair<Uint64, Type>,
+				ReadPair<void, Type>,
 				ReadPair<void, Uint64>
 			>
 		>
 		{
 			enum w : proc_opcode
 			{
+				Push,
+				Pop,
+				Erase,
+				EraseIf,
 				Insert,
 				Write,
-				Overwrite
 			};
 			enum r : proc_opcode
 			{
 				Range,
 				Read,
+				Back,
 				Size
 			};
 			enum f : proc_opcode
@@ -478,10 +536,15 @@ namespace rdb::type
 			return *_at_impl(idx);
 		}
 
+		const trivial_type* data() const noexcept
+			requires _is_trivial
+		{
+			return reinterpret_cast<const trivial_type*>(_buffer());
+		}
 		trivial_type* data() noexcept
 			requires _is_trivial
 		{
-			return _buffer();
+			return reinterpret_cast<trivial_type*>(_buffer());
 		}
 
 		iterator begin() noexcept
@@ -570,8 +633,8 @@ namespace rdb::type
 			{
 				if constexpr (_is_string)
 				{
-					const auto len = std::min(prefix_length(), buffer.size());
-					std::memcpy(buffer.data().data(), _buffer(), len);
+					const auto len = std::min(prefix_length(order), buffer.size());
+					std::memcpy(buffer.mutate().data(), _buffer(), len);
 					return len;
 				}
 				else
@@ -587,7 +650,8 @@ namespace rdb::type
 									ptr->prefix_length(),
 									buffer.size() - len
 								)
-							)
+							),
+							order
 						);
 						off += ptr->storage();
 					}
@@ -642,7 +706,91 @@ namespace rdb::type
 
 		wproc_query_result wproc(proc_opcode opcode, const proc_param& arguments, wproc_query query) noexcept
 		{
-			return wproc_type::Static;
+			if constexpr (Fragmented)
+			{
+				return wproc_type::Delta;
+			}
+			else
+			{
+				if (query == wproc_query::Commit)
+				{
+					if (opcode == Op::Push)
+					{
+						const auto size = _size();
+						const auto req = size + arguments.size();
+						if (req > _volume())
+						{
+							_set_dims(
+								_size() + arguments.size(),
+								req * 1.5
+							);
+						}
+						else
+							_set_size(req);
+
+						std::memcpy(
+							_binary_buffer(size).data(),
+							arguments.data().data(),
+							arguments.size()
+						);
+
+						return wproc_status::Ok;
+					}
+					else if (opcode == Op::EraseIf)
+					{
+						auto value = TypedView<Tuple<Type, Character>>::view(arguments.data());
+						const auto fop = value->template field<1>()->value();
+						std::size_t removed = 0;
+						for (std::size_t off = 0; off != _size();)
+						{
+							auto* ptr = _at(off);
+							const auto size = ptr->storage();
+							if (ptr->fproc(fop, value->template field<0>()))
+							{
+								removed += size;
+								std::memmove(
+									ptr,
+									_at(off + size),
+									storage() - removed
+								);
+							}
+							off += size;
+						}
+						const auto nsize = _size() - removed;
+						_set_dims(
+							nsize,
+							nsize < _volume() / 2 ? nsize : _volume()
+						);
+
+						return wproc_status::Ok;
+					}
+				}
+				else if (query == wproc_query::Storage)
+				{
+					if (opcode == Op::Push)
+					{
+						const auto req = _size() + arguments.size();
+						if (req <= _volume())
+							return _volume();
+						return req * 1.5;
+					}
+					else if (opcode == Op::EraseIf)
+					{
+						auto value = TypedView<Tuple<Type, Character>>::view(arguments.data());
+						const auto fop = value->template field<1>()->value();
+						std::size_t removed = 0;
+						for (decltype(auto) it : *this)
+							if (it.fproc(fop, value->template field<0>()))
+								removed += it.storage();
+						const auto nsize = _size() - removed;
+						if (nsize < _volume() / 2)
+							return nsize;
+						return _volume();
+					}
+				}
+				return wproc_type::Dynamic;
+			}
+			return wproc_status::Error;
 		}
 		rproc_result rproc(proc_opcode opcode, const proc_param&) const noexcept
 		{

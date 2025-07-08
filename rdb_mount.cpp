@@ -323,9 +323,9 @@ namespace rdb
 
 		// Get sort keys
 		if (info->skeys() &&
-			op == cmd::qOp::Fetch || op == cmd::qOp::Check ||
+			(op == cmd::qOp::Fetch || op == cmd::qOp::Check ||
 			op == cmd::qOp::Remove ||
-			op == cmd::qOp::PageFrom)
+			op == cmd::qOp::PageFrom))
 		{
 			const auto size = byte::sread<std::uint32_t>(packet, off);
 			sort = View::view(packet.subspan(off, size));

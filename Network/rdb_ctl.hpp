@@ -6,7 +6,7 @@
 
 namespace rdb
 {
-	namespace impl
+	namespace cmd
 	{
 		template<typename Type>
 		struct is_list_kind : std::false_type {};
@@ -126,7 +126,7 @@ namespace rdb
 									= str.substr(off, f - off);
 								off = f;
 							}
-							else if constexpr (impl::is_list_kind<type>::value)
+							else if constexpr (cmd::is_list_kind<type>::value)
 							{
 
 							}

@@ -31,7 +31,7 @@ namespace rdb::type
 		}
 		static auto minline(std::span<unsigned char> view) noexcept
 		{
-			ScalarBase::minline(view,
+			return ScalarBase::minline(view,
 				std::chrono::system_clock::now().time_since_epoch().count()
 			);
 		}

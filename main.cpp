@@ -29,21 +29,32 @@ int main()
 {
 	std::filesystem::remove_all("/tmp/RDB");
 
-	using message = rdb::Schema<"Message",
+	// using message = rdb::Schema<"Message",
+	// 	rdb::Topology<
+	// 		rdb::Field<"ServerID", rdbt::RandUUID>,
+	// 		rdb::Field<"ChannelID", rdbt::RandUUID>,
+	// 		rdb::Field<"DayBucket", rdbt::Timestamp>
+	// 	>,
+	// 	rdb::Topology<
+	// 		rdb::Field<"ID", rdbt::TimeUUID, rdb::FieldType::Sort, rdb::Order::Descending>,
+	// 		rdb::Field<"SenderID", rdbt::TimeUUID>,
+	// 		rdb::Field<"Flags", rdbt::Bitset<32>>,
+	// 		rdb::Field<"Message", rdbt::Binary>,
+	// 		rdb::Field<"Resources", rdbt::Nullable<rdbt::Buffer<rdbt::TimeUUID>>>
+	// 	>
+	// >;
+	// rdb::require<message>();
+
+	using test = rdb::Schema<"Test",
 		rdb::Topology<
-			rdb::Field<"ServerID", rdbt::RandUUID>,
-			rdb::Field<"ChannelID", rdbt::RandUUID>,
-			rdb::Field<"DayBucket", rdbt::Timestamp>
+			rdb::Field<"Key", rdbt::String>
 		>,
 		rdb::Topology<
-			rdb::Field<"ID", rdbt::TimeUUID, rdb::FieldType::Sort, rdb::Order::Descending>,
-			rdb::Field<"SenderID", rdbt::TimeUUID>,
-			rdb::Field<"Flags", rdbt::Bitset<32>>,
-			rdb::Field<"Message", rdbt::Binary>,
-			rdb::Field<"Resources", rdbt::Nullable<rdbt::Buffer<rdbt::TimeUUID>>>
+			rdb::Field<"Val", rdbt::String, rdb::FieldType::Sort>,
+			rdb::Field<"Val2", rdbt::Uint64>
 		>
 	>;
-	rdb::require<message>();
+	rdb::require<test>();
 
 	rdb::Mount::ptr mnt =
 		rdb::Mount::make({
@@ -54,97 +65,118 @@ int main()
 		});
 	mnt->start();
 
-	rdb::CTL::ptr ctl = rdb::CTL::make(mnt);
-	{
-		std::thread([=]() {
-			std::string in;
-			while (std::getline(std::cin, in))
-				std::cout << " -> " << ctl->eval(in) << std::endl;
-		}).detach();
-	}
+	mnt->query
+		<< rdb::create<test>(std::string_view("Key"), std::string_view("SKey"), 1)
+		<< rdb::execute<>;
 
-	auto send_message = [&](
-		const std::string& sender,
-		const rdb::uuid::uint128_t& server,
-		const rdb::uuid::uint128_t& channel,
-		const std::string& data)
-	{
-		const auto id = rdbt::TimeUUID::id();
-		mnt->query
-			<< rdb::create<message>(
-				server,
-				channel,
-				rdbt::Timestamp::now(rdbt::Timestamp::Round::Day),
-				id,
-				rdb::uuid::uint128_t(),
-				rdbt::Bitset<32>::list(),
-				rdb::byte::sspan(data),
-				rdbt::null
-			)
-			<< rdb::execute<>;
-		return id;
-	};
+	mnt->run<test>([](rdb::MemoryCache* cache) {
+		cache->flush();
+	});
+	std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
-	// Some samples
-	rdb::uuid::uint128_t id;
-	{
-		id = send_message("A", rdb::uuid::uint128_t(), rdb::uuid::uint128_t(), "Hello World");
-		send_message("B", {}, {}, "This is a sample message");
-		send_message("A", {}, {}, "This is another sample message");
-		send_message("B", {}, {}, "This message is indeed yet another sample message");
-	}
-	// Disk reads
-	{
-		// Show the amount of data in the memory cache at this moment
-		std::cout << ctl->eval("cache.pressure 'Message'") << std::endl;
-		ctl->eval("cache.flush 'Message'");
+	test::interface_view<"Val2"> result;
+	mnt->query
+		<< rdb::compose(
+			rdb::fetch<test>(std::string_view("Key"), std::string_view("SKey"))
+			| rdb::read<"Val2">(&result)
+		)
+		<< rdb::execute<>;
 
-		// Wait to make sure that the flush is not running (since while the flush is running all data is accessible from memory)
-		std::this_thread::sleep_for(std::chrono::seconds(2));
+	std::cout
+		<< (result == nullptr ? std::string("<null>") : result->print())
+		<< std::endl;
 
-		message::interface_view<"Message"> result;
-		mnt->query
-			<< rdb::compose(
-				rdb::fetch<message>(
-					// Partition key
-					rdb::uuid::uint128_t(),
-					rdb::uuid::uint128_t(),
-					rdbt::Timestamp::now(rdbt::Timestamp::Round::Day),
-					// Sorting key
-					id
-				)
-				| rdb::read<"Message">(&result)
-			)
-			<< rdb::execute<>;
+	// rdb::CTL::ptr ctl = rdb::CTL::make(mnt);
+	// {
+	// 	std::thread([=]() {
+	// 		std::string in;
+	// 		while (std::getline(std::cin, in))
+	// 			std::cout << " -> " << ctl->eval(in) << std::endl;
+	// 	}).detach();
+	// }
 
-		// Handles to disk flushes should be cached
-		std::cout << ctl->eval("cache.handles 'Message'") << std::endl;
+	// auto send_message = [&](
+	// 	const std::string& sender,
+	// 	const rdb::uuid::uint128_t& server,
+	// 	const rdb::uuid::uint128_t& channel,
+	// 	const std::string& data)
+	// {
+	// 	const auto id = rdbt::TimeUUID::id();
+	// 	mnt->query
+	// 		<< rdb::create<message>(
+	// 			server,
+	// 			channel,
+	// 			rdbt::Timestamp::now(rdbt::Timestamp::Round::Day),
+	// 			id,
+	// 			rdb::uuid::uint128_t(),
+	// 			rdbt::Bitset<32>::list(),
+	// 			rdb::byte::sspan(data),
+	// 			rdbt::null
+	// 		)
+	// 		<< rdb::execute<>;
+	// 	return id;
+	// };
 
-		if (result == nullptr)
-			std::cout << "Not Found" << std::endl;
-		else
-			std::cout << result->print() << std::endl;
-	}
-	// Send some more
-	{
-		send_message("A", {}, {}, "Some zeroes??? 000000000");
-		send_message("B", {}, {}, "Fr fr much appreciated");
-		send_message("B", {}, {}, "0000000000000000000000000000000000000000");
-	}
-	// Paging
-	{
-		rdb::TableList<message> li;
-		mnt->query
-			<< rdb::page<message>(
-				&li, 10,
-				rdb::uuid::uint128_t(), rdb::uuid::uint128_t(),
-				rdbt::Timestamp::now(rdbt::Timestamp::Round::Day)
-			)
-			<< rdb::execute<>;
+	// // Some samples
+	// rdb::uuid::uint128_t id;
+	// {
+	// 	id = send_message("A", rdb::uuid::uint128_t(), rdb::uuid::uint128_t(), "Hello World");
+	// 	send_message("B", {}, {}, "This is a sample message");
+	// 	send_message("A", {}, {}, "This is another sample message");
+	// 	send_message("B", {}, {}, "This message is indeed yet another sample message");
+	// }
+	// // Disk reads
+	// {
+	// 	// Show the amount of data in the memory cache at this moment
+	// 	std::cout << ctl->eval("cache.pressure 'Message'") << std::endl;
+	// 	ctl->eval("cache.flush 'Message'");
 
-		for (decltype(auto) it : li)
-			std::cout << it.print() << std::endl;
-	}
+	// 	// Wait to make sure that the flush is not running (since while the flush is running all data is accessible from memory)
+	// 	std::this_thread::sleep_for(std::chrono::seconds(2));
+
+	// 	message::interface_view<"Message"> result;
+	// 	mnt->query
+	// 		<< rdb::compose(
+	// 			rdb::fetch<message>(
+	// 				// Partition key
+	// 				rdb::uuid::uint128_t(),
+	// 				rdb::uuid::uint128_t(),
+	// 				rdbt::Timestamp::now(rdbt::Timestamp::Round::Day),
+	// 				// Sorting key
+	// 				id
+	// 			)
+	// 			| rdb::read<"Message">(&result)
+	// 		)
+	// 		<< rdb::execute<>;
+
+	// 	// Handles to disk flushes should be cached
+	// 	std::cout << ctl->eval("cache.handles 'Message'") << std::endl;
+
+	// 	if (result == nullptr)
+	// 		std::cout << "Not Found" << std::endl;
+	// 	else
+	// 		std::cout << result->print() << std::endl;
+	// }
+	// // Send some more
+	// {
+	// 	send_message("A", {}, {}, "Some zeroes??? 000000000");
+	// 	send_message("B", {}, {}, "Fr fr much appreciated");
+	// 	send_message("B", {}, {}, "0000000000000000000000000000000000000000");
+	// }
+	// // Paging
+	// {
+	// 	rdb::TableList<message> li;
+	// 	mnt->query
+	// 		<< rdb::page<message>(
+	// 			&li, 10,
+	// 			rdb::uuid::uint128_t(), rdb::uuid::uint128_t(),
+	// 			rdbt::Timestamp::now(rdbt::Timestamp::Round::Day)
+	// 		)
+	// 		<< rdb::execute<>;
+
+	// 	for (decltype(auto) it : li)
+	// 		std::cout << it.print() << std::endl;
+	// }
 
 	mnt->wait();
 }

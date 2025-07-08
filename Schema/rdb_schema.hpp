@@ -263,7 +263,7 @@ namespace rdb
 			));
 		}
 
-		View prefix(rdb::Order order) const noexcept
+		View make_prefix(rdb::Order order) const noexcept
 		{
 			auto* base = static_cast<const Base*>(this);
 			const auto length = base->prefix_length();
@@ -813,7 +813,7 @@ namespace rdb
 			}
 			std::memcpy(dest.data(), data.data().data(), data.data().size());
 
-			return 0;
+			return buffer;
 		}
 		std::size_t apply_write(std::size_t idx, proc_opcode op, proc_param data, std::size_t buffer) noexcept
 		{
@@ -846,7 +846,7 @@ namespace rdb
 				View::view(data),
 				wproc_query::Commit
 			);
-			return 0;
+			return buffer;
 		}
 
 		template<cmp::ConstString Name>

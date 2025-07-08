@@ -248,7 +248,7 @@ namespace rdb
 		else
 			return 0;
 	}
-	std::size_t MemoryCache::_read_entry_impl(const View& view, DataType type, field_bitmap& fields, const read_callback& callback) noexcept
+	std::size_t MemoryCache::_read_entry_impl(const View& view, DataType type, field_bitmap& fields, const read_callback* callback) noexcept
 	{
 		RuntimeSchemaReflection::RTSI& info =
 			RuntimeSchemaReflection::info(_schema);
@@ -270,7 +270,7 @@ namespace rdb
 					{
 						fields.reset(field);
 						cnt++;
-						callback(field, View::view(view.data().subspan(beg, off - beg)));
+						(*callback)(field, View::view(view.data().subspan(beg, off - beg)));
 					}
 				}
 				else
@@ -296,7 +296,7 @@ namespace rdb
 					{
 						fields.reset(idx);
 						cnt++;
-						callback(idx, View::view(view.data().subspan(beg, off - beg)));
+						(*callback)(idx, View::view(view.data().subspan(beg, off - beg)));
 					}
 				}
 				else
@@ -308,7 +308,7 @@ namespace rdb
 		}
 		return cnt;
 	}
-	std::size_t MemoryCache::_read_cache_impl(write_store& map, key_type key, const View& sort, field_bitmap& fields, const read_callback& callback) noexcept
+	std::size_t MemoryCache::_read_cache_impl(write_store& map, key_type key, const View& sort, field_bitmap& fields, const read_callback* callback) noexcept
 	{
 		auto fp = map.find(key);
 		if (fp == map.end())
@@ -350,7 +350,7 @@ namespace rdb
 		return { off, metadata };
 	}
 
-	bool MemoryCache::_read_impl(key_type key, const View& sort, field_bitmap fields, const read_callback& callback) noexcept
+	bool MemoryCache::_read_impl(key_type key, const View& sort, field_bitmap fields, const read_callback* callback) noexcept
 	{
 		RDB_FMT("VCPU{} MC READ <{}>", _id, uuid::encode(key, uuid::table_alnum))
 
@@ -362,7 +362,6 @@ namespace rdb
 
 		RuntimeSchemaReflection::RTSI& info =
 			RuntimeSchemaReflection::info(_schema);
-		const auto dynamic = !info.static_prefix();
 		const auto required = callback ? fields.count() : 1;
 		const auto flush_running = _flush_running.load();
 
@@ -416,261 +415,230 @@ namespace rdb
 					auto off = partition_offset.value();
 
 					// Search data
-
-					// Wide partition
-					if (info.skeys())
 					{
-						RDB_TRACE("VCPU{} MC READ SEARCHING IN PARTITION", _id)
-
-						const auto partition_size = byte::sread<std::uint64_t>(data.memory(), off);
-
-						std::size_t partition_footer_off = off + partition_size;
-
-						const auto sparse_block_indices = byte::sread<std::uint32_t>(data.memory(), partition_footer_off);
-						const auto sort_bloom_offset = byte::sread<std::uint64_t>(data.memory(), partition_footer_off);
-
-						if (!_bloom_may_contain(uuid::xxhash(sort), sort_bloom_offset, handle))
+						// Wide partition
+						if (info.skeys())
 						{
-							RDB_TRACE("VCPU{} MC READ INTRA-PARTITION BLOOM DISCARD", _id)
-							continue;
-						}
+							RDB_TRACE("VCPU{} MC READ SEARCHING IN PARTITION", _id)
 
-						const auto index = data.memory().subspan(partition_footer_off);
-						const auto sparse_block_offset = sparse_block_indices ?
-							(dynamic ?
-								byte::search_partition_binary_indirect<std::uint64_t, std::uint64_t, std::uint16_t>(
-									sort, index, data.memory(), sparse_block_indices, true, true
-								) :
-								byte::search_partition_binary<std::uint64_t>(
-									sort, index, sparse_block_indices, true, true
-								)
-							) : std::optional<std::uint64_t>(off);
+							const auto partition_size = byte::sread<std::uint64_t>(data.memory(), off);
 
-						// Linar search across blocks
-						if (sparse_block_offset.has_value())
-						{
-							data.hint(Mapper::Access::Sequential);
+							std::size_t partition_footer_off = off + partition_size;
 
-							off = sparse_block_offset.value();
+							const auto dynamic_prefix = byte::sread<std::uint32_t>(data.memory(), partition_footer_off);
+							const auto prefix = dynamic_prefix ? dynamic_prefix : sort.size();
+							const auto sparse_block_indices = byte::sread<std::uint32_t>(data.memory(), partition_footer_off);
+							const auto sort_bloom_offset = byte::sread<std::uint64_t>(data.memory(), partition_footer_off);
 
-							RDB_TRACE("VCPU{} MC READ SEARCHING IN BLOCK SEQUENCE", _id)
-							while (off < offset + partition_size)
+							if (!_bloom_may_contain(uuid::xxhash(sort), sort_bloom_offset, handle))
 							{
-								const auto prefix = info.static_prefix();
+								RDB_TRACE("VCPU{} MC READ INTRA-PARTITION BLOOM DISCARD", _id)
+								continue;
+							}
 
-								/*const auto checksum = */byte::sread<std::uint64_t>(data.memory(), off);
-								const auto index_count = byte::sread<std::uint32_t>(data.memory(), off);
+							const auto sparse_block_offset = sparse_block_indices ? byte::search_partition_binary<std::uint32_t>(
+								sort.data(), data.memory().subspan(partition_footer_off), sparse_block_indices, true, true
+							) : std::optional<std::uint32_t>(off);
 
-								View min_key;
-								View max_key;
+							// Linar search across blocks
+							if (sparse_block_offset.has_value())
+							{
+								data.hint(Mapper::Access::Sequential);
 
-								auto saved_off = off;
-								if (dynamic)
+								off = sparse_block_offset.value();
+
+								RDB_TRACE("VCPU{} MC READ SEARCHING IN BLOCK SEQUENCE", _id)
+								while (off < offset + partition_size)
 								{
-									const auto keyspace_size = byte::sread<std::uint32_t>(data.memory(), off);
-									const auto keyspace_last = byte::sread<std::uint32_t>(data.memory(), off);
+									/*const auto checksum = */byte::sread<std::uint64_t>(data.memory(), off);
+									/*const auto prefix = */byte::sread<std::uint32_t>(data.memory(), off);
+									const auto index_count = byte::sread<std::uint32_t>(data.memory(), off);
 
-									std::size_t min_off = off;
-									std::size_t max_off = off + keyspace_last;
+									View min_key = View::view(data.memory().subspan(off, prefix));
+									View max_key = View::view(data.memory().subspan(off + (index_count - 1) * (prefix + sizeof(std::uint32_t)), prefix));
 
-									const auto len_min = byte::sread<std::uint16_t>(data.memory(), min_off);
-									const auto len_max = byte::sread<std::uint16_t>(data.memory(), max_off);
-
-									min_key = View::view(data.memory().subspan(min_off, len_min));
-									max_key = View::view(data.memory().subspan(max_off, len_max));
-
-									saved_off += sizeof(std::uint32_t) * 2;
-									off += keyspace_size + (index_count * (sizeof(std::uint32_t) * 2));
-								}
-								else
-								{
-									min_key = View::view(data.memory().subspan(off, prefix));
-									max_key = View::view(data.memory().subspan(off + (index_count - 1) * (prefix + sizeof(std::uint32_t)), prefix));
+									const auto saved_off = off;
 									off += index_count * (prefix + sizeof(std::uint32_t));
-								}
 
-								const auto decompressed = byte::sread<std::uint32_t>(data.memory(), off);
-								const auto compressed = byte::sread<std::uint32_t>(data.memory(), off);
+									const auto decompressed = byte::sread<std::uint32_t>(data.memory(), off);
+									const auto compressed = byte::sread<std::uint32_t>(data.memory(), off);
 
-								const auto result_min = byte::binary_compare(sort, min_key);
-								const auto result_max = byte::binary_compare(sort, max_key);
+									const auto result_min = byte::binary_compare(sort, min_key);
+									const auto result_max = byte::binary_compare(sort, max_key);
 
-								if ((result_min <= 0 && result_max >= 0) ||
-									(result_max <= 0 && result_min >= 0))
-								{
-									const auto ascending = (result_min <= 0 && result_max >= 0);
+									if ((result_min <= 0 && result_max >= 0) ||
+										(result_max <= 0 && result_min >= 0))
+									{
+										const auto ascending = (result_min <= 0 && result_max >= 0);
 
-									RDB_TRACE("VCPU{} MC READ FOUND MATCHING BLOCK", _id)
+										RDB_TRACE("VCPU{} MC READ FOUND MATCHING BLOCK", _id)
 
-									const auto sparse_offset = dynamic ?
-										byte::search_partition_binary_indirect<std::uint32_t, std::uint32_t, std::uint16_t>(
-											sort, index, data.memory().subspan(saved_off), index_count, true
-										) :
-										byte::search_partition_binary<std::uint32_t>(
+										const auto sparse_offset = byte::search_partition_binary<std::uint32_t>(
 											sort.data(), data.memory().subspan(saved_off), prefix, index_count, ascending, true
 										);
 
-									if (sparse_offset.has_value())
-									{
-										StaticBufferSink sink = (decompressed == compressed) ?
-											StaticBufferSink() : StaticBufferSink(decompressed);
-										SourceView source(data.memory().subspan(off, compressed));
-										std::span<const unsigned char> block;
-
-										if (decompressed != compressed)
+										if (sparse_offset.has_value())
 										{
-											snappy::Uncompress(&source, &sink);
-											block = sink.data();
-										}
-										else
-										{
-											block = data.memory().subspan(off, decompressed);
-										}
+											StaticBufferSink sink = (decompressed == compressed) ?
+												StaticBufferSink() : StaticBufferSink(decompressed);
+											SourceView source(data.memory().subspan(off, compressed));
+											std::span<const unsigned char> block;
 
-										RDB_TRACE("VCPU{} MC READ LINEAR BLOCK SEARCH", _id)
-
-										off = sparse_offset.value() + info.partition_size(block.data());
-										do
-										{
-											const auto type = DataType(block[off++]);
-											const auto instance = View::view(block.subspan(off));
-											bool eq = false;
-											if (type == DataType::SchemaInstance)
+											if (decompressed != compressed)
 											{
-												const auto len = info.prefix_length(block.data() + off);
-												View prefix = View::copy(len);
-												info.prefix(block.data() + off, View::view(prefix));
-												eq = byte::binary_equal(sort, prefix.data());
-											}
-											else if (type == DataType::Tombstone)
-											{
-												RDB_TRACE("VCPU{} MC READ VALUE REMOVED", _id)
-												return false;
+												snappy::Uncompress(&source, &sink);
+												block = sink.data();
 											}
 											else
 											{
-												const auto len = byte::sread<std::uint16_t>(block, off);
-												eq = byte::binary_equal(sort, block.subspan(off, len));
-												off += len;
+												block = data.memory().subspan(off, decompressed);
 											}
 
-											if (eq)
+											RDB_TRACE("VCPU{} MC READ LINEAR BLOCK SEARCH", _id)
+
+											off = sparse_offset.value();
+											do
 											{
-												RDB_TRACE("VCPU{} MC READ FOUND VALUE", _id)
-												if ((found += _read_entry_impl(instance, type, fields, callback)) == required)
+												const auto type = DataType(block[off++]);
+												const auto instance = View::view(block.subspan(off));
+												bool eq = false;
+												if (type == DataType::SchemaInstance)
 												{
-													return true;
+													const auto len = info.prefix_length(block.data() + off);
+													View prefix = View::copy(len);
+													info.prefix(block.data() + off, View::view(prefix));
+													eq = byte::binary_equal(sort, prefix.data());
+												}
+												else if (type == DataType::Tombstone)
+												{
+													RDB_TRACE("VCPU{} MC READ VALUE REMOVED", _id)
+													return false;
 												}
 												else
 												{
-													RDB_TRACE("VCPU{} MC CONTINUE SEARCH", _id)
-													break;
+													const auto len = byte::sread<std::uint32_t>(block, off);
+													eq = byte::binary_equal(sort, block.subspan(off, len));
+													off += len;
 												}
-											}
-											else
-											{
-												off += _read_entry_size_impl(
-													View::view(block.subspan(off)), type
-												);
-											}
-										} while (off < block.size());
+
+												if (eq)
+												{
+													RDB_TRACE("VCPU{} MC READ FOUND VALUE", _id)
+													if ((found += _read_entry_impl(instance, type, fields, callback)) == required)
+													{
+														return true;
+													}
+													else
+													{
+														RDB_TRACE("VCPU{} MC CONTINUE SEARCH", _id)
+														break;
+													}
+												}
+												else
+												{
+													off += _read_entry_size_impl(
+														View::view(block.subspan(off)), type
+													);
+												}
+											} while (off < block.size());
+										}
+										else
+										{
+											RDB_TRACE("VCPU{} MC READ BLOOM MISS", _id)
+										}
 									}
 									else
-									{
-										RDB_TRACE("VCPU{} MC READ BLOOM MISS", _id)
-									}
+										off += compressed;
 								}
-								else
-									off += compressed;
-							}
-						}
-						else
-						{
-							RDB_TRACE("VCPU{} MC READ BLOOM SORT MISS", _id)
-						}
-					}
-					// Unary partition
-					else
-					{
-						// Search block
-						// Search the sparse index table
-						// Linear search the partition
-
-						// Block header
-
-						/*const auto checksum = */byte::sread<std::uint64_t>(data.memory(), off);
-						const auto index_count = byte::sread<std::uint32_t>(data.memory(), off);
-
-						// Search in block
-
-						RDB_TRACE("VCPU{} MC READ SEARCHING IN BLOCK", _id)
-
-						const auto sparse_offset = byte::search_partition<key_type, std::uint64_t>(
-							key, data.memory().subspan(off), index_count, true
-						);
-
-						// Continue block hehader
-
-						off += index_count * (sizeof(key_type) + sizeof(std::uint64_t));
-
-						const auto decompressed = byte::sread<std::uint32_t>(data.memory(), off);
-						const auto compressed = byte::sread<std::uint32_t>(data.memory(), off);
-
-						if (sparse_offset.has_value())
-						{
-							data.hint(Mapper::Access::Sequential);
-
-							StaticBufferSink sink = (decompressed == compressed) ?
-								StaticBufferSink() : StaticBufferSink(decompressed);
-							SourceView source(data.memory().subspan(off, compressed));
-							std::span<const unsigned char> block;
-
-							if (decompressed != compressed)
-							{
-								snappy::Uncompress(&source, &sink);
-								block = sink.data();
 							}
 							else
 							{
-								block = data.memory().subspan(off, decompressed);
+								RDB_TRACE("VCPU{} MC READ BLOOM SORT MISS", _id)
 							}
+						}
+						// Unary partition
+						else
+						{
+							// Search block
+							// Search the sparse index table
+							// Linear search the partition
 
-							RDB_TRACE("VCPU{} MC READ LINEAR BLOCK SEARCH", _id)
+							// Block header
 
-							off = sparse_offset.value();
-							do
+							/*const auto checksum = */byte::sread<std::uint64_t>(data.memory(), off);
+							const auto index_count = byte::sread<std::uint32_t>(data.memory(), off);
+
+							// Search in block
+
+							RDB_TRACE("VCPU{} MC READ SEARCHING IN BLOCK", _id)
+
+							const auto sparse_offset = byte::search_partition<key_type, std::uint32_t>(
+								key, data.memory().subspan(off), index_count, true
+							);
+
+							// Continue block hehader
+
+							off += index_count * (sizeof(key_type) + sizeof(std::uint32_t));
+
+							const auto decompressed = byte::sread<std::uint32_t>(data.memory(), off);
+							const auto compressed = byte::sread<std::uint32_t>(data.memory(), off);
+
+							if (sparse_offset.has_value())
 							{
-								if (byte::sread<key_type>(block, off) == key)
+								data.hint(Mapper::Access::Sequential);
+
+								StaticBufferSink sink = (decompressed == compressed) ?
+									StaticBufferSink() : StaticBufferSink(decompressed);
+								SourceView source(data.memory().subspan(off, compressed));
+								std::span<const unsigned char> block;
+
+								if (decompressed != compressed)
 								{
-									RDB_TRACE("VCPU{} MC READ FOUND VALUE", _id)
-
-									const auto type = DataType(block[off++]);
-									const auto instance = View::view(block.subspan(off));
-									if (type == DataType::Tombstone)
-										return false;
-
-									if ((found += _read_entry_impl(instance, type, fields, callback)) == required)
-									{
-										return true;
-									}
-									else
-									{
-										RDB_TRACE("VCPU{} MC CONTINUE SEARCH", _id)
-										break;
-									}
+									snappy::Uncompress(&source, &sink);
+									block = sink.data();
 								}
 								else
 								{
-									const auto type = DataType(block[off++]);
-									const auto instance = View::view(block.subspan(off));
-									off += _read_entry_size_impl(instance, type);
-									off += info.partition_size(block.data() + off);
+									block = data.memory().subspan(off, decompressed);
 								}
-							} while (off < block.size());
-						}
-						else
-						{
-							RDB_TRACE("VCPU{} MC READ BLOOM MISS", _id)
+
+								RDB_TRACE("VCPU{} MC READ LINEAR BLOCK SEARCH", _id)
+
+								off = sparse_offset.value();
+								do
+								{
+									if (byte::sread<key_type>(block, off) == key)
+									{
+										RDB_TRACE("VCPU{} MC READ FOUND VALUE", _id)
+
+										const auto type = DataType(block[off++]);
+										const auto instance = View::view(block.subspan(off));
+										if (type == DataType::Tombstone)
+											return false;
+
+										if ((found += _read_entry_impl(instance, type, fields, callback)) == required)
+										{
+											return true;
+										}
+										else
+										{
+											RDB_TRACE("VCPU{} MC CONTINUE SEARCH", _id)
+											break;
+										}
+									}
+									else
+									{
+										const auto type = DataType(block[off++]);
+										const auto instance = View::view(block.subspan(off));
+										off += _read_entry_size_impl(instance, type);
+										off += info.partition_size(block.data() + off);
+									}
+								} while (off < block.size());
+							}
+							else
+							{
+								RDB_TRACE("VCPU{} MC READ BLOOM MISS", _id)
+							}
 						}
 					}
 				}
@@ -979,9 +947,9 @@ namespace rdb
 			return result;
 		}
 	}
-	bool MemoryCache::read(key_type key, const View& sort, field_bitmap fields, const read_callback& callback) noexcept
+	void MemoryCache::read(key_type key, const View& sort, field_bitmap fields, const read_callback& callback) noexcept
 	{
-		return _read_impl(key, sort, fields, callback);
+		_read_impl(key, sort, fields, &callback);
 	}
 	bool MemoryCache::exists(key_type key, const View& sort) noexcept
 	{
@@ -1140,39 +1108,7 @@ namespace rdb
 			}
 			else if (type == WriteType::WProc)
 			{
-				field_bitmap fields;
-				fields.set(data[0]);
-
-				View result;
-				if (!read(partition->first, sort, fields,
-						[&](std::size_t, View value) {
-							result = std::move(value);
-						})
-					) return;
-
-				RuntimeSchemaReflection::RTSI& info =
-					RuntimeSchemaReflection::info(_schema);
-				RuntimeInterfaceReflection::RTII& finfo =
-					info.reflect(data[0]);
-
-				auto* sdata = result.mutate().data();
-				const auto args = View::view(data.subspan(2));
-				const auto op = data[1];
-				const auto type = finfo.wproc(sdata, op, args, wproc_query::Type);
-				if (type == wproc_type::Dynamic)
-				{
-					const auto size = finfo.wproc(sdata, op, args, wproc_query::Storage);
-					if (size > slot->size)
-						slot = _create_slot(partition, sort, DataType::FieldSequence, size + 1);
-				}
-				else
-					slot = _create_slot(partition, sort, DataType::FieldSequence, result.size() + 1);
-
-				slot->buffer()[0] = data[0];
-				std::memcpy(slot->buffer().data() + 1, result.data().data(), result.size());
-				finfo.wproc(slot->buffer().data() + 1, op, args, wproc_query::Commit);
-
-				_push_bytes(result.size() + sort.size() + sizeof(key_type));
+				std::terminate();
 			}
 		}
 		else if (type == WriteType::Field)
@@ -1213,65 +1149,83 @@ namespace rdb
 		}
 		else if (type == WriteType::WProc)
 		{
-			RuntimeSchemaReflection::RTSI& info =
-				RuntimeSchemaReflection::info(_schema);
-			RuntimeInterfaceReflection::RTII& finfo =
-				info.reflect(data[0]);
+			std::terminate();
+			// RuntimeSchemaReflection::RTSI& info =
+			// 	RuntimeSchemaReflection::info(_schema);
+			// RuntimeInterfaceReflection::RTII& finfo =
+			// 	info.reflect(data[0]);
 
-			if (finfo.fragmented())
-			{
+			// if (finfo.fragmented())
+			// {
 
-			}
-			else
-			{
-				if (slot->vtype == DataType::Tombstone)
-				{
-					return;
-				}
-				else if (slot->vtype == DataType::SchemaInstance)
-				{
-					const auto ptr = slot->buffer().data();
-					const auto field = data[0];
-					const auto op = data[1];
-					const auto args = View::view(data.subspan(2));
-					const auto size = info.wpapply(ptr, field, op, args, slot->capacity);
-					if (size > slot->capacity)
-					{
-						slot = _resize_slot(partition, sort, size);
-						info.wpapply(slot->buffer().data(), field, op, args, ~0ull);
-						_push_bytes(size);
-					}
-					else
-						slot->size = size;
-				}
-				else if (slot->vtype == DataType::FieldSequence)
-				{
-					auto* sdata = slot->buffer().data();
-					for (std::size_t off = 0; off != slot->size;)
-					{
-						const auto field = sdata[off++];
-						if (field == data[0])
-						{
-							const auto args = View::view(data.subspan(2));
-							const auto op = data[1];
-							const auto type = finfo.wproc(sdata + off, op, args, wproc_query::Type);
-							if (type == wproc_type::Dynamic)
-							{
-								const auto size = finfo.wproc(sdata + off, op, args, wproc_query::Storage);
-								if (size > slot->size)
-								{
-									slot = _resize_slot(partition, sort, size);
-									_push_bytes(size);
-								}
-							}
-							finfo.wproc(slot->buffer().data() + off, op, args, wproc_query::Commit);
-							break;
-						}
-						RuntimeInterfaceReflection::RTII& cinfo = info.reflect(field);
-						off += cinfo.storage(sdata + off);
-					}
-				}
-			}
+			// }
+			// else
+			// {
+			// 	if (wtype == WriteType::Remov)
+			// 	{
+			// 		return;
+			// 	}
+			// 	else if (wtype == WriteType::Table)
+			// 	{
+			// 		if (const auto size = info.wpapply(
+			// 				storage.data().data() + 1,
+			// 				data[0], data[1], View::view(data.subspan(2)),
+			// 				storage.size()
+			// 			); size > storage.data().size())
+			// 		{
+			// 			storage.resize(size);
+			// 			info.wpapply(
+			// 				storage.data().data() + 1,
+			// 				data[0], data[1], View::view(data.subspan(2)),
+			// 				~0ull
+			// 			);
+			// 		}
+			// 	}
+			// 	else if (wtype == WriteType::Field)
+			// 	{
+			// 		if (data[0] == storage.data()[0])
+			// 		{
+			// 			// RuntimeSchemaReflection::RTSI& schema = RuntimeSchemaReflection::info(_schema);
+			// 			// const auto type = schema.reflect(data[0]).wproc(
+			// 			// 	storage.data().subspan(1).data(),
+			// 			// 	data[1],
+			// 			// 	View::view(data.subspan(2)),
+			// 			// 	wproc_query::Type
+			// 			// );
+			// 			// if (type == wproc_type::Dynamic)
+			// 			// {
+			// 			// 	const auto req = schema.reflect(data[0]).wproc(
+			// 			// 		storage.data().subspan(1).data(),
+			// 			// 		data[1],
+			// 			// 		View::view(data.subspan(2)),
+			// 			// 		wproc_query::Storage
+			// 			// 	);
+			// 			// 	if (req > storage.size())
+			// 			// 		storage.resize(req);
+			// 			// }
+			// 			// schema.reflect(data[0]).wproc(
+			// 			// 	storage.data().subspan(1).data(),
+			// 			// 	data[1],
+			// 			// 	View::view(data.subspan(2)),
+			// 			// 	wproc_query::Commit
+			// 			// );
+			// 		}
+			// 		else
+			// 		{
+
+			// 		}
+			// 	}
+			// 	else
+			// 	{
+			// 		// field_bitmap fields{};
+			// 		// fields.set(data[0]);
+			// 		// read(partition->first, sort, fields, [&](std::size_t, View view) {
+			// 		// 	const auto field = info.reflect(data[0]);
+
+			// 		// 	write()
+			// 		// });
+			// 	}
+			// }
 		}
 	}
 	void MemoryCache::_reset_impl(write_store::iterator partition, const View& sort) noexcept
@@ -1510,36 +1464,22 @@ namespace rdb
 		}
 		// Stream blocks
 		{
-			const bool dynamic = !info.static_prefix();
+			const bool dynamic_skey = !info.static_prefix();
 			bool is_begin = true;
 			std::size_t blocks = 0;
+			std::size_t prefix = 0;
 			std::size_t start = data.size();
 			std::size_t bloom_offset = 0;
 			std::size_t bloom_bits = 0;
 			std::size_t i = 0;
+			std::vector<std::pair<key_type, std::uint32_t>> indices{};
+			std::vector<std::pair<View, std::uint32_t>> sort_block_indices{};
+			std::vector<std::pair<View, std::uint32_t>> sort_indices{};
 
-			// For unary partitions
-
-			std::vector<std::pair<key_type, std::uint64_t>> indices{};
-
-			// For static wide partitions
-			// Since keys are static length we just put them directly in the binary search table
-
-			std::vector<std::pair<std::span<const unsigned char>, std::uint64_t>> sort_block_indices{};
-			std::vector<std::pair<std::span<const unsigned char>, std::uint32_t>> sort_indices{};
-
-			// For dynamic wide partitions
-			// We store all keys in their own block (uncompressed) and then binary search a table with offsets to the block
-			// The zero keyspace offset is since the beginning of the data file
-
-			std::size_t sort_keyspace_offset = 0;
-			std::size_t zero_keyspace_offset = ~0ull;
-			std::vector<std::span<const unsigned char>> sort_keyspace{};
-			std::vector<std::pair<std::uint64_t, std::uint64_t>> sort_block_dynamic_indices{};
-			std::vector<std::pair<std::uint32_t, std::uint32_t>> sort_dynamic_indices{};
-
-			if (!keys)
-				indices.reserve((offsets.size() / _cfg->cache.partition_sparse_index_ratio) / 2);
+			if (keys && !dynamic_skey)
+				prefix = info.static_prefix();
+			else
+				indices.reserve((offsets.size() / _cfg->cache.block_sparse_index_ratio) / 2);
 
 			BlockSourceMultiplexer source(block_pool, frag_pool);
 
@@ -1562,7 +1502,7 @@ namespace rdb
 					"VCPU{} MC FLUSH{} HIGH FRAGMENTATION: {}", _id, id, source.fragments()
 				)
 
-				const auto saved_zero_index = (keys && !dynamic ? sort_indices[0].first : std::span<const unsigned char>());
+				const auto saved_zero_index = keys ? View::view(sort_indices[0].first) : View();
 
 				source.flush();
 				// Index
@@ -1571,35 +1511,14 @@ namespace rdb
 					data.vmap_increment(byte::swrite<std::uint64_t>(data.append(), source.digest()));
 					if (keys)
 					{
-						if (dynamic)
+						data.vmap_increment(byte::swrite<std::uint32_t>(data.append(), prefix));
+						data.vmap_increment(byte::swrite<std::uint32_t>(data.append(), sort_indices.size()));
+						for (decltype(auto) it : sort_indices)
 						{
-							data.vmap_increment(byte::swrite<std::uint32_t>(data.append(), sort_dynamic_indices.size()));
-							data.vmap_increment(byte::swrite<std::uint32_t>(data.append(), sort_keyspace_offset));
-							data.vmap_increment(byte::swrite<std::uint32_t>(data.append(), sort_keyspace_offset - sort_keyspace.back().size() - sizeof(std::uint16_t)));
-							if (zero_keyspace_offset == ~0ull)
-								zero_keyspace_offset = data.size();
-							for (decltype(auto) it : sort_keyspace)
-							{
-								data.vmap_increment(byte::swrite<std::uint16_t>(data.append(), it.size()));
-								data.vmap_increment(byte::swrite(data.append(), it));
-							}
-							for (decltype(auto) it : sort_dynamic_indices)
-							{
-								data.vmap_increment(byte::swrite<std::uint32_t>(data.append(), it.first));
-								data.vmap_increment(byte::swrite<std::uint32_t>(data.append(), it.second));
-							}
-							sort_dynamic_indices.clear();
+							data.vmap_increment(byte::swrite(data.append(), it.first));
+							data.vmap_increment(byte::swrite<std::uint32_t>(data.append(), it.second));
 						}
-						else
-						{
-							data.vmap_increment(byte::swrite<std::uint32_t>(data.append(), sort_indices.size()));
-							for (decltype(auto) it : sort_indices)
-							{
-								data.vmap_increment(byte::swrite(data.append(), it.first));
-								data.vmap_increment(byte::swrite<std::uint32_t>(data.append(), it.second));
-							}
-							sort_indices.clear();
-						}
+						sort_indices.clear();
 					}
 					else
 					{
@@ -1607,7 +1526,7 @@ namespace rdb
 						for (decltype(auto) it : indices)
 						{
 							data.vmap_increment(byte::swrite<key_type>(data.append(), it.first));
-							data.vmap_increment(byte::swrite<std::uint64_t>(data.append(), it.second));
+							data.vmap_increment(byte::swrite<std::uint32_t>(data.append(), it.second));
 						}
 						indices.clear();
 					}
@@ -1641,50 +1560,24 @@ namespace rdb
 
 					if (keys)
 					{
-						if (dynamic)
+						if (is_begin)
 						{
-							if (is_begin)
+							byte::swrite(data.memory().subspan(start), data.size() - start - sizeof(std::uint64_t));
+							data.vmap_increment(byte::swrite<std::uint32_t>(data.append(), prefix));
+							data.vmap_increment(byte::swrite<std::uint32_t>(data.append(), sort_block_indices.size()));
+							data.vmap_increment(byte::swrite<std::uint64_t>(data.append(), bloom_offset));
+							for (decltype(auto) it : sort_block_indices)
 							{
-								byte::swrite<std::uint64_t>(data.memory().subspan(start), data.size() - start - sizeof(std::uint64_t));
-								data.vmap_increment(byte::swrite<std::uint32_t>(data.append(), sort_block_dynamic_indices.size()));
-								data.vmap_increment(byte::swrite<std::uint64_t>(data.append(), bloom_offset));
-								for (decltype(auto) it : sort_block_dynamic_indices)
-								{
-									data.vmap_increment(byte::swrite<std::uint64_t>(data.append(), it.first));
-									data.vmap_increment(byte::swrite<std::uint64_t>(data.append(), it.second));
-								}
-								sort_block_dynamic_indices.clear();
+								data.vmap_increment(byte::swrite(data.append(), it.first));
+								data.vmap_increment(byte::swrite<std::uint32_t>(data.append(), it.second));
 							}
-							else if (blocks % _cfg->cache.block_sparse_index_ratio == 0)
-							{
-								sort_block_dynamic_indices.push_back({
-									zero_keyspace_offset,
-									start
-								});
-								zero_keyspace_offset = ~0ull;
-							}
+							sort_block_indices.clear();
 						}
-						else
+						else if (blocks % _cfg->cache.block_sparse_index_ratio == 0)
 						{
-							if (is_begin)
-							{
-								byte::swrite<std::uint64_t>(data.memory().subspan(start), data.size() - start - sizeof(std::uint64_t));
-								data.vmap_increment(byte::swrite<std::uint32_t>(data.append(), sort_block_indices.size()));
-								data.vmap_increment(byte::swrite<std::uint64_t>(data.append(), bloom_offset));
-								for (decltype(auto) it : sort_block_indices)
-								{
-									data.vmap_increment(byte::swrite(data.append(), it.first));
-									data.vmap_increment(byte::swrite<std::uint64_t>(data.append(), it.second));
-								}
-								sort_block_indices.clear();
-							}
-							else if (blocks % _cfg->cache.block_sparse_index_ratio == 0)
-							{
-								sort_block_indices.push_back({
-									saved_zero_index,
-									start
-								});
-							}
+							sort_block_indices.push_back({
+								saved_zero_index, start
+							});
 						}
 					}
 				}
@@ -1703,17 +1596,6 @@ namespace rdb
 					const auto part_iterator = map.find(offsets[i]);
 					const auto& [ pkey, pdata ] = part_iterator->second;
 					const auto& part = std::get<partition>(pdata);
-
-					if (dynamic)
-					{
-						sort_block_dynamic_indices.reserve(part.size() / _cfg->cache.partition_sparse_index_ratio);
-						sort_dynamic_indices.reserve(sort_block_indices.capacity() / _cfg->cache.block_sparse_index_ratio);
-					}
-					else
-					{
-						sort_block_indices.reserve(part.size() / _cfg->cache.partition_sparse_index_ratio);
-						sort_indices.reserve(sort_block_indices.capacity() / _cfg->cache.block_sparse_index_ratio);
-					}
 
 					// Reserve partition data and setup partition
 					{
@@ -1738,22 +1620,14 @@ namespace rdb
 						const auto buffer = data->flush_buffer();
 						if (j % _cfg->cache.partition_sparse_index_ratio == 0)
 						{
-							if (dynamic)
+							if (dynamic_skey)
 							{
-								sort_dynamic_indices.push_back({
-									sort_keyspace_offset,
-									source.size()
-								});
-								sort_keyspace.push_back(key);
-								sort_keyspace_offset += key.size() + sizeof(std::uint16_t);
+								// Perform prefix calculations
 							}
-							else
-							{
-								sort_indices.push_back({
-									key,
-									source.size()
-								});
-							}
+							sort_indices.push_back({
+								View::view(key),
+								source.size()
+							});
 						}
 
 						if (data->vtype == DataType::SchemaInstance) source.push({ .data = buffer });
@@ -1780,15 +1654,14 @@ namespace rdb
 				}
 				else
 				{
-					// Construct block
-					for (; i < offsets.size() && source.size() <= _cfg->cache.block_size; i++)
+					for (; i < offsets.size(); i++)
 					{
 						const auto& [ pkey, pdata ] = map.at(offsets[i]);
 						const auto buffer = std::get<single_slot>(pdata)->flush_buffer();
 						source.push({ .data = pkey });
 						if (!buffer.empty())
 						{
-							if (i % _cfg->cache.partition_sparse_index_ratio == 0)
+							if (i % _cfg->cache.block_sparse_index_ratio == 0)
 							{
 								indices.push_back({
 									offsets[i],
@@ -1798,14 +1671,11 @@ namespace rdb
 							source.push({ .data = byte::tspan(offsets[i]) });
 						}
 						source.push({ .data = buffer });
+						if (source.size() > _cfg->cache.block_size)
+							break;
 					}
-					// Index and write block
-					i--;
-					{
-						index();
-						write_block();
-					}
-					i++;
+					index();
+					write_block();
 				}
 			}
 		}

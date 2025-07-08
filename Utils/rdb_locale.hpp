@@ -450,6 +450,61 @@ namespace rdb::byte
 		else
 			return std::nullopt;
 	}
+
+	template<typename Offset, typename Value, typename Size>
+	std::optional<Value> search_partition_binary_indirect(std::span<const unsigned char> key, std::span<const unsigned char> data, std::span<const unsigned char> storage, std::size_t cells, bool ascending, bool closest = false) noexcept
+	{
+		std::size_t partition_left = 0;
+		std::size_t partition_right = cells - 1;
+		std::size_t optimal = ~0ull;
+		bool has_optimal = false;
+
+		const auto max = ascending ? std::strong_ordering::greater : std::strong_ordering::less;
+		const auto min = ascending ? std::strong_ordering::less : std::strong_ordering::greater;
+		do
+		{
+			const auto idx = (
+				partition_left + (
+					(partition_right - partition_left) / 2
+				)
+			);
+			auto off = idx * (sizeof(Offset) + sizeof(Value));
+			auto ioff = static_cast<std::size_t>(byte::sread<Offset>(data, off));
+
+			const auto len = byte::sread<Size>(storage, ioff);
+			const auto v = storage.subspan(ioff, len);
+
+			const auto result = binary_compare(v, key);
+			if (result == max)
+			{
+				partition_left = idx + 1;
+			}
+			else if (result == min)
+			{
+				partition_right = idx - 1;
+				optimal = idx;
+				has_optimal = true;
+			}
+			else
+			{
+				return byte::sread<Value>(data, off);
+			}
+		} while (partition_left <= partition_right);
+
+		if (closest)
+		{
+			if (!has_optimal)
+				return std::nullopt;
+			return byte::sread<Value>(
+				data.subspan(
+					(optimal * (sizeof(Offset) + sizeof(Value))) +
+					sizeof(Offset)
+				)
+			);
+		}
+		else
+			return std::nullopt;
+	}
 }
 
 #endif // RDB_LOCALE_HPP

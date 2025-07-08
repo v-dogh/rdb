@@ -24,7 +24,7 @@ namespace rdb
 	{
 		_input.push_back(node);
 		_size +=
-			(!node.key.empty() * sizeof(std::uint32_t)) +
+			(!node.key.empty() * sizeof(std::uint16_t)) +
 			node.key.size() + node.data.size();
 	}
 	void BlockSourceMultiplexer::flush() noexcept
@@ -38,7 +38,7 @@ namespace rdb
 			if (!it.key.empty())
 			{
 				state.update(it.key.begin(), it.key.end());
-				const std::uint32_t len = it.key.size();
+				const std::uint16_t len = it.key.size();
 				std::memcpy(_block.data() + idx, &len, sizeof(len));
 				idx += sizeof(len);
 				std::memcpy(_block.data() + idx, it.key.data(), it.key.size());

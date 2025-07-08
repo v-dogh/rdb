@@ -55,6 +55,34 @@ namespace rdb::type
 				const storage_type mask = 1u << rem;
 				_data[quot] ^= mask;
 			}
+
+			static constexpr auto _make_table() noexcept
+			{
+				std::array<std::uint16_t, 256> table{};
+				constexpr std::string_view digits = "0123456789abcdef";
+
+				for (std::size_t i = 0; i < 256; i++)
+				{
+					auto high = digits[i >> 4];
+					auto low = digits[i & 0xF];
+					if constexpr (std::endian::native == std::endian::little)
+					{
+						table[i] = static_cast<std::uint16_t>(
+							(static_cast<unsigned>(low) << 8) |
+							static_cast<unsigned>(high)
+						);
+					}
+					else
+					{
+						table[i] = static_cast<std::uint16_t>(
+							(static_cast<unsigned>(high) << 8) |
+							static_cast<unsigned>(low)
+						);
+					}
+				}
+				return table;
+			}
+			static constexpr auto _hex_table = _make_table();
 		public:
 			constexpr BitBuffer() noexcept = default;
 			constexpr BitBuffer(BitBuffer&&) noexcept = default;
@@ -158,6 +186,17 @@ namespace rdb::type
 				}
 			}
 
+			constexpr std::string hex() const noexcept
+			{
+				std::string out;
+				out.resize(_data.size() * 2);
+
+				auto* buf16 = reinterpret_cast<std::uint16_t*>(out.data());
+				for (std::size_t i = 0; i < _data.size(); i++)
+					buf16[i] = _hex_table[_data[i]];
+				return out;
+			}
+
 			constexpr BitBuffer& operator=(const BitBuffer&) noexcept = default;
 			constexpr BitBuffer& operator=(BitBuffer&&) noexcept = default;
 		};
@@ -241,6 +280,10 @@ namespace rdb::type
 				out << (_bits.test(i) ? '+' : '-');
 			out << " ]";
 			return out.str();
+		}
+		std::string hex() const noexcept
+		{
+			return _bits.hex();
 		}
 
 		wproc_query_result wproc(proc_opcode opcode, const proc_param& arguments, wproc_query query) noexcept

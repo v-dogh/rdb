@@ -29,7 +29,7 @@ namespace rdb
 		std::uint64_t _digest{};
 	public:
 		BlockSourceMultiplexer(std::span<unsigned char> block, std::span<Node> fragments) :
-			_pool(fragments.data(), fragments.size() * sizeof(fragments[0])),
+			_pool(fragments.data(), fragments.size() * sizeof(Node)),
 			_block_pool(block.data(), block.size())
 		{
 			_input.reserve(fragments.size());
@@ -52,6 +52,7 @@ namespace rdb
 		virtual void Skip(std::size_t cnt) override;
 		virtual std::size_t Available() const override;
 	};
+
 	class SourceView : public snappy::Source
 	{
 	private:
