@@ -337,8 +337,8 @@ namespace rdb
 
 		const auto [ off1, schema, inf ] = _query_parse_op_rtsi(packet, state, info); off += off1;
 		if (inf == nullptr) return off1;
-		const auto [ off2, pkey, key ] = _query_parse_op_pkey(packet, *inf, state, info); off += off2;
-		const auto [ off3, sort ] = _query_parse_op_skey(packet, *inf, state, info); off += off3;
+		const auto [ off2, pkey, key ] = _query_parse_op_pkey(packet.subspan(off), *inf, state, info); off += off2;
+		const auto [ off3, sort ] = _query_parse_op_skey(packet.subspan(off), *inf, state, info); off += off3;
 
 		std::size_t coff = 0;
 		while ((coff = _query_parse_schema_operator(
@@ -363,7 +363,7 @@ namespace rdb
 
 		const auto [ off1, schema, inf ] = _query_parse_op_rtsi(packet, state, info); off += off1;
 		if (inf == nullptr) return off1;
-		const auto [ off2, pkey, key ] = _query_parse_op_pkey(packet, *inf, state, info); off += off2;
+		const auto [ off2, pkey, key ] = _query_parse_op_pkey(packet.subspan(off), *inf, state, info); off += off2;
 
 		auto& core = _threads[_vcpu(key)];
 
@@ -393,8 +393,8 @@ namespace rdb
 
 		const auto [ off1, schema, inf ] = _query_parse_op_rtsi(packet, state, info); off += off1;
 		if (inf == nullptr) return off1;
-		const auto [ off2, pkey, key ] = _query_parse_op_pkey(packet, *inf, state, info); off += off2;
-		const auto [ off3, sort ] = _query_parse_op_skey(packet, *inf, state, info); off += off3;
+		const auto [ off2, pkey, key ] = _query_parse_op_pkey(packet.subspan(off), *inf, state, info); off += off2;
+		const auto [ off3, sort ] = _query_parse_op_skey(packet.subspan(off), *inf, state, info); off += off3;
 
 		auto& core = _threads[_vcpu(key)];
 
@@ -412,8 +412,8 @@ namespace rdb
 
 		const auto [ off1, schema, inf ] = _query_parse_op_rtsi(packet, state, info); off += off1;
 		if (inf == nullptr) return off1;
-		const auto [ off2, pkey, key ] = _query_parse_op_pkey(packet, *inf, state, info); off += off2;
-		const auto [ off3, sort ] = _query_parse_op_skey(packet, *inf, state, info); off += off3;
+		const auto [ off2, pkey, key ] = _query_parse_op_pkey(packet.subspan(off), *inf, state, info); off += off2;
+		const auto [ off3, sort ] = _query_parse_op_skey(packet.subspan(off), *inf, state, info); off += off3;
 
 		auto& core = _threads[_vcpu(key)];
 		const auto count = byte::sread<std::uint32_t>(packet, off);
@@ -434,8 +434,8 @@ namespace rdb
 
 		const auto [ off1, schema, inf ] = _query_parse_op_rtsi(packet, state, info); off += off1;
 		if (inf == nullptr) return off1;
-		const auto [ off2, pkey, key ] = _query_parse_op_pkey(packet, *inf, state, info); off += off2;
-		const auto [ off3, sort ] = _query_parse_op_skey(packet, *inf, state, info); off += off3;
+		const auto [ off2, pkey, key ] = _query_parse_op_pkey(packet.subspan(off), *inf, state, info); off += off2;
+		const auto [ off3, sort ] = _query_parse_op_skey(packet.subspan(off), *inf, state, info); off += off3;
 
 		auto& core = _threads[_vcpu(key)];
 		const auto count = byte::sread<std::uint32_t>(packet, off);
@@ -456,8 +456,8 @@ namespace rdb
 
 		const auto [ off1, schema, inf ] = _query_parse_op_rtsi(packet, state, info); off += off1;
 		if (inf == nullptr) return off1;
-		const auto [ off2, pkey, key ] = _query_parse_op_pkey(packet, *inf, state, info); off += off2;
-		const auto [ off3, sort ] = _query_parse_op_skey(packet, *inf, state, info); off += off3;
+		const auto [ off2, pkey, key ] = _query_parse_op_pkey(packet.subspan(off), *inf, state, info); off += off2;
+		const auto [ off3, sort ] = _query_parse_op_skey(packet.subspan(off), *inf, state, info); off += off3;
 
 		std::size_t coff = 0;
 		while ((coff = _query_parse_predicate_operator(
@@ -500,6 +500,7 @@ namespace rdb
 	std::size_t Mount::_query_parse_op_barrier(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept
 	{
 		state.wait();
+		return 0;
 	}
 
 	std::size_t Mount::_query_parse_operand(std::span<const unsigned char> packet, ParserState& state, ParserInfo info) noexcept
