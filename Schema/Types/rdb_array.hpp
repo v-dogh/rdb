@@ -298,15 +298,16 @@ namespace rdb::type
 		{
 			return iterator(
 				0,
-				Size,
+				_volume(),
 				_buffer()
 			);
 		}
 		iterator end() noexcept
 		{
+			const auto vol = _volume();
 			return iterator(
-				Size,
-				Size,
+				vol,
+				vol,
 				_buffer()
 			);
 		}
@@ -315,15 +316,16 @@ namespace rdb::type
 		{
 			return const_iterator(
 				0,
-				Size,
+				_volume(),
 				_buffer()
 			);
 		}
 		const_iterator end() const noexcept
 		{
+			const auto vol = _volume();
 			return const_iterator(
-				Size,
-				Size,
+				vol,
+				vol,
 				_buffer()
 			);
 		}

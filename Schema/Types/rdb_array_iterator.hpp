@@ -27,15 +27,15 @@ namespace rdb::type::impl
 			return reinterpret_cast<pointer>(
 				reinterpret_cast<std::conditional_t<
 					Const, const unsigned char*, unsigned char*
-				>>(ptr) + idx
+				>>(ptr) + (idx * Type::static_storage())
 			);
 		}
 	public:
 		explicit ArrayIterator(
-			std::size_t idx = 0,
+				std::size_t idx = 0,
 			std::size_t size = 0,
 			pointer ptr = nullptr
-		) : _ptr(_at(ptr, idx)), _size(size) {}
+		) : _ptr(_at(ptr, idx / Type::static_storage())), _size(size / Type::static_storage()) {}
 
 		reference operator*() const noexcept { return *_ptr; }
 		pointer operator->() const noexcept { return _ptr; }

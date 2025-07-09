@@ -44,7 +44,7 @@ namespace rdb::type
 			std::is_same_v<Type, Byte>;
 		static constexpr auto _sortable = Type::uproperty.is(Type::uproperty.sortable);
 		static constexpr auto _sbo_max =
-			(sizeof(std::uint64_t) * 2 - 1) / trivial_interface::storage;
+			sizeof(std::uint64_t) * 2 - 1;
 		static constexpr auto _volume_mask =
 			byte::byteswap_for_storage<std::uint64_t>(
 				~std::uint64_t(0) >> 1
@@ -416,7 +416,8 @@ namespace rdb::type
 				!std::is_same_v<std::decay_t<Arg>, trivial_list>
 			)
 		{
-			_set_size(sizeof...(Argv) + 1);
+			const auto size = Type::mstorage(arg) + (Type::mstorage(args) + ... + 0);
+			_set_dims(size, size);
 			std::size_t off = 0;
 			auto write = [&]<typename Value>(Value&& arg) {
 				const auto beg = off;
@@ -428,14 +429,16 @@ namespace rdb::type
 			};
 			(write(std::forward<Arg>(arg)));
 			(write(std::forward<Argv>(args)), ...);
-			_set_volume(off, sizeof...(Argv) + 1);
 		}
 		explicit BufferBase(list li) :
 			BufferBase(std::span(li.begin(), li.end()))
 		{}
 		explicit BufferBase(view_list li)
 		{
-			_set_size(li.size());
+			const auto size = std::accumulate(li.begin(), li.end(), [](auto ctr, auto val) {
+				return ctr + val.size();
+			});
+			_set_dims(size, size);
 			std::size_t off = 0;
 			for (decltype(auto) it : li)
 			{
@@ -447,11 +450,11 @@ namespace rdb::type
 					it.size()
 				);
 			}
-			_set_volume(off, li.size());
 		}
 		explicit BufferBase(const Reserve& res)
 		{
-			_set_dims(res.size, res.size * Type::mstorage());
+			const auto size = res.size * Type::mstorage();
+			_set_dims(size, size);
 		}
 		explicit BufferBase(trivial_type* ptr)
 			requires _is_string : BufferBase(
@@ -460,7 +463,8 @@ namespace rdb::type
 		explicit BufferBase(std::basic_string_view<trivial_type> str)
 			requires _is_string
 		{
-			_set_dims(str.size(), str.size() * Type::static_storage());
+			const auto size = str.size() * Type::static_storage();
+			_set_dims(size, size);
 			std::memcpy(
 				_buffer(),
 				str.data(),
@@ -470,7 +474,8 @@ namespace rdb::type
 		explicit BufferBase(trivial_list str)
 			requires _is_trivial
 		{
-			_set_dims(str.size(), str.size() * Type::static_storage());
+			const auto size = str.size() * Type::static_storage();
+			_set_dims(size, size);
 			std::memcpy(
 				_buffer(),
 				str.data(),
@@ -524,7 +529,21 @@ namespace rdb::type
 
 		std::size_t size() const noexcept
 		{
-			return _size();
+			if constexpr (_is_trivial)
+			{
+				return _size() / Type::static_storage();
+			}
+			else
+			{
+				std::size_t idx = 0;
+				std::size_t off = 0;
+				while (off != _size())
+				{
+					off += _at(off)->storage();
+					idx++;
+				}
+				return idx;
+			}
 		}
 
 		const Type& at(std::size_t idx) const noexcept
@@ -586,7 +605,7 @@ namespace rdb::type
 			if constexpr (_is_trivial)
 			{
 				return uuid::xxhash(
-					_binary_buffer().subspan(0, _volume())
+					_binary_buffer().subspan(0, _size())
 				);
 			}
 			else
@@ -672,7 +691,7 @@ namespace rdb::type
 			{
 				return std::format("'{}'",
 					std::basic_string_view<trivial_type>(
-						_buffer()->underlying(), _size() + 1
+						_buffer()->underlying(), _size()
 					)
 				);
 			}
@@ -721,7 +740,7 @@ namespace rdb::type
 						if (req > _volume())
 						{
 							_set_dims(
-								_size() + arguments.size(),
+								req,
 								req * 1.5
 							);
 						}

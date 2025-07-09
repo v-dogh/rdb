@@ -67,17 +67,24 @@ namespace rdb
 			ControlFlowInfo() = default;
 			ControlFlowInfo(ControlFlowInfo&&) = delete;
 			ControlFlowInfo(const ControlFlowInfo&) = delete;
+			~ControlFlowInfo()
+			{
+				util::nano_wait(_order_ctr, _order_max, std::memory_order::relaxed);
+			}
 
 			auto order() noexcept
 			{
 				return _order_max++;
 			}
-			void set(bool value, std::size_t order) noexcept
+			bool set(bool value, std::size_t order) noexcept
 			{
+				bool result;
 				util::nano_wait(_order_ctr, order, std::memory_order::relaxed);
 				_state = _filter(_state, value);
+				result = _state;
 				++_order_ctr;
 				_order_ctr.notify_all();
+				return result;
 			}
 			bool get() const noexcept
 			{

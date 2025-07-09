@@ -612,9 +612,8 @@ namespace rdb
 			state.acquire();
 			core.launch(Thread::task(schema, [=, order = cfi.order(), &cfi, &state, this](MemoryCache* cache) {
 				const auto result = cache->exists(key, sort);
-				cfi.set(result, order);
 				auto v = View::copy(1);
-				v.mutate()[0] = static_cast<unsigned char>(result);
+				v.mutate()[0] = cfi.set(result, order);
 				state.push(std::move(v), ParserInfo{
 					.operand_idx = info.operand_idx,
 					.operator_idx = op_idx

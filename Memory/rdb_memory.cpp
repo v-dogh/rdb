@@ -259,10 +259,9 @@ namespace rdb
 			do
 			{
 				const auto field = view.data()[off++];
-				const auto beg = off;
 				RuntimeInterfaceReflection::RTII& finf =
 					info.reflect(field);
-				off += finf.storage(view.data().data() + off);
+				const auto size = finf.storage(view.data().data() + off);
 
 				if (callback)
 				{
@@ -270,13 +269,14 @@ namespace rdb
 					{
 						fields.reset(field);
 						cnt++;
-						callback(field, View::view(view.data().subspan(beg, off - beg)));
+						callback(field, View::view(view.data().subspan(off, size)));
 					}
 				}
 				else
 				{
 					return 1;
 				}
+				off += size;
 			} while (off < view.size());
 		}
 		else if (type == DataType::SchemaInstance)
@@ -285,10 +285,9 @@ namespace rdb
 			std::size_t idx = 0;
 			while (off < view.size())
 			{
-				const auto beg = off;
 				RuntimeInterfaceReflection::RTII& finf =
 					info.reflect(idx);
-				off += finf.storage(view.data().data() + off);
+				const auto size = finf.storage(view.data().data() + off);
 
 				if (callback)
 				{
@@ -296,13 +295,14 @@ namespace rdb
 					{
 						fields.reset(idx);
 						cnt++;
-						callback(idx, View::view(view.data().subspan(beg, off - beg)));
+						callback(idx, View::view(view.data().subspan(off, size)));
 					}
 				}
 				else
 				{
 					return 1;
 				}
+				off += size;
 				idx++;
 			}
 		}
