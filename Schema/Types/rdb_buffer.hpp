@@ -63,10 +63,7 @@ namespace rdb::type
 			} _std{ 0, 0 };
 			struct
 			{
-				std::conditional_t<(_sbo_max > 0),
-					std::array<Type, _sbo_max>,
-					std::array<unsigned char, sizeof(std::uint64_t) * 2 - 1>
-				> buffer;
+				std::array<unsigned char, _sbo_max> buffer;
 				std::uint8_t length;
 			} _sbo;
 		};
@@ -152,9 +149,7 @@ namespace rdb::type
 			{
 				if (_has_sbo())
 				{
-					return std::span(reinterpret_cast<const unsigned char*>(
-						_sbo.buffer.data()
-					) + off, std::dynamic_extent);
+					return std::span(_sbo.buffer.data() + off, std::dynamic_extent);
 				}
 			}
 			return std::span(static_cast<const unsigned char*>(
@@ -177,9 +172,7 @@ namespace rdb::type
 			{
 				if (_has_sbo())
 				{
-					return reinterpret_cast<const Type*>(reinterpret_cast<const unsigned char*>(
-						_sbo.buffer.data()
-					) + off);
+					return reinterpret_cast<const Type*>(_sbo.buffer.data() + off);
 				}
 			}
 			return reinterpret_cast<const Type*>(static_cast<const unsigned char*>(
@@ -273,7 +266,7 @@ namespace rdb::type
 		{
 			if (res.size)
 			{
-				if (res.size < _sbo_max)
+				if (res.size * Type::mstorage() < _sbo_max)
 				{
 					return sizeof(BufferBase);
 				}
@@ -320,7 +313,7 @@ namespace rdb::type
 		{
 			if constexpr (sizeof...(Argv))
 			{
-				if constexpr (sizeof...(Argv) < _sbo_max)
+				if ((Type::mstorage(args) + ... + 0) < _sbo_max)
 				{
 					return sizeof(BufferBase);
 				}
@@ -435,7 +428,7 @@ namespace rdb::type
 		{}
 		explicit BufferBase(view_list li)
 		{
-			const auto size = std::accumulate(li.begin(), li.end(), [](auto ctr, auto val) {
+			const auto size = std::accumulate(li.begin(), li.end(), std::size_t{ 0 }, [](auto ctr, auto val) {
 				return ctr + val.size();
 			});
 			_set_dims(size, size);
