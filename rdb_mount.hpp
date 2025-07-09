@@ -3,7 +3,6 @@
 
 #include <memory_resource>
 #include <condition_variable>
-#include <future>
 #include <memory>
 #include <vector>
 #include <functional>
@@ -54,6 +53,60 @@ namespace rdb
 				sem->release();
 			}
 		};
+		struct ControlFlowInfo
+		{
+		private:
+			std::atomic<std::size_t> _order_ctr{ 0 };
+			std::size_t _order_max{ 0 };
+			std::size_t _chain_size{ ~0ull };
+			bool _state{ false };
+			bool(*_filter)(bool, bool){ [](bool o, bool n) {
+				return n;
+			}};
+		public:
+			ControlFlowInfo() = default;
+			ControlFlowInfo(ControlFlowInfo&&) = delete;
+			ControlFlowInfo(const ControlFlowInfo&) = delete;
+
+			auto order() noexcept
+			{
+				return _order_max++;
+			}
+			void set(bool value, std::size_t order) noexcept
+			{
+				util::nano_wait(_order_ctr, order, std::memory_order::relaxed);
+				_state = _filter(_state, value);
+				++_order_ctr;
+				_order_ctr.notify_all();
+			}
+			bool get() const noexcept
+			{
+				util::nano_wait(_order_ctr, _order_max, std::memory_order::relaxed);
+				return _state;
+			}
+			void set_filter(bool(*filter)(bool, bool)) noexcept
+			{
+				const auto o = order();
+				util::nano_wait(_order_ctr, o, std::memory_order::relaxed);
+				_filter = filter;
+				++_order_ctr;
+				_order_ctr.notify_all();
+			}
+			void reset_filter() noexcept
+			{
+				set_filter([](bool o, bool n) {
+					return n;
+				});
+			}
+			void set_chain(std::size_t size) noexcept
+			{
+				_chain_size = size;
+			}
+			auto get_chain() const noexcept
+			{
+				return _chain_size;
+			}
+		};
 		struct ParserInfo
 		{
 			unsigned short operand_idx{ 0 };
@@ -85,23 +138,7 @@ namespace rdb
 			}
 			void wait() const noexcept
 			{
-				// Optimize for short queries
-
-				for (int i = 0; i < 1000; ++i)
-				{
-					if (ref.load(std::memory_order::acquire) == 0)
-						return;
-					util::spinlock_yield();
-				}
-
-				// Optimize for longer queries
-
-				auto expected = ref.load(std::memory_order::acquire);
-				while (expected != 0)
-				{
-					ref.wait(expected, std::memory_order::acquire);
-					expected = ref.load(std::memory_order::acquire);
-				}
+				util::nano_wait(ref, 0ul, std::memory_order::relaxed);
 			}
 			void acquire() noexcept
 			{
@@ -150,9 +187,34 @@ namespace rdb
 		void _replay_queries() noexcept;
 
 		std::size_t _vcpu(key_type key) const noexcept;
+
+		std::tuple<std::size_t, schema_type, const RuntimeSchemaReflection::RTSI*> _query_parse_op_rtsi(std::span<const unsigned char> packet, ParserState& state, ParserInfo info) noexcept;
+		std::tuple<std::size_t, View, key_type> _query_parse_op_pkey(std::span<const unsigned char> packet, const RuntimeSchemaReflection::RTSI& inf, ParserState& state, ParserInfo info) noexcept;
+		std::tuple<std::size_t, View> _query_parse_op_skey(std::span<const unsigned char> packet, const RuntimeSchemaReflection::RTSI& inf, ParserState& state, ParserInfo info) noexcept;
+
+		std::size_t _query_parse_op_fetch(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept;
+		std::size_t _query_parse_op_create(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept;
+		std::size_t _query_parse_op_remove(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept;
+		std::size_t _query_parse_op_page(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept;
+		std::size_t _query_parse_op_page_from(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept;
+		std::size_t _query_parse_op_check(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept;
+		std::size_t _query_parse_op_if(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept;
+		std::size_t _query_parse_op_barrier(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept;
+
 		std::size_t _query_parse_operand(std::span<const unsigned char> packet, ParserState& state, ParserInfo info) noexcept;
-		std::size_t _query_parse_schema_operator(std::span<const unsigned char> packet, key_type key, View partition, View sort, schema_type schema, ParserState& state, ParserInfo& info) noexcept;
-		std::size_t _query_parse_predicate_operator(std::span<const unsigned char> packet, key_type key, View partition, View sort, schema_type schema, ParserState& state, ParserInfo& info) noexcept;
+		std::size_t _query_parse_schema_operator(std::span<const unsigned char> packet, key_type key, View partition, View sort, schema_type schema, ParserState& state, ControlFlowInfo& cfi, ParserInfo& info) noexcept;
+		std::size_t _query_parse_predicate_operator(std::span<const unsigned char> packet, key_type key, View partition, View sort, schema_type schema, ParserState& state, ControlFlowInfo& cfi, ParserInfo& info) noexcept;
+
+		static inline const std::array _op_parse_table{
+			&Mount::_query_parse_op_fetch,
+			&Mount::_query_parse_op_create,
+			&Mount::_query_parse_op_remove,
+			&Mount::_query_parse_op_page,
+			&Mount::_query_parse_op_page_from,
+			&Mount::_query_parse_op_check,
+			&Mount::_query_parse_op_if,
+			&Mount::_query_parse_op_barrier
+		};
 	public:
 		friend class QueryEngine;
 		QueryEngine& query{ *this };

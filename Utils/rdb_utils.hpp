@@ -1,6 +1,7 @@
 #ifndef RDB_UTILS_HPP
 #define RDB_UTILS_HPP
 
+#include <atomic>
 #include <bitset>
 #include <chrono>
 #include <cstring>
@@ -726,6 +727,24 @@ namespace rdb
 	namespace util
 	{
 		void spinlock_yield() noexcept;
+
+		template<typename Type>
+		void nano_wait(const std::atomic<Type>& var, const Type& value, std::memory_order order = std::memory_order::acquire) noexcept
+		{
+			for (int i = 0; i < 1000; ++i)
+			{
+				if (var.load(order) == value)
+					return;
+				util::spinlock_yield();
+			}
+
+			auto expected = var.load(std::memory_order::acquire);
+			while (expected != value)
+			{
+				var.wait(expected, std::memory_order::acquire);
+				expected = var.load(std::memory_order::acquire);
+			}
+		}
 
 		template<std::size_t Count>
 		std::size_t bitset_first(const std::bitset<Count>& value) noexcept

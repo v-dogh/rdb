@@ -16,6 +16,10 @@ namespace rdb::cmd
 		Page,
 		PageFrom,
 
+		// Filter operands
+
+		Check,
+
 		// Control flow
 
 		If,
@@ -28,11 +32,6 @@ namespace rdb::cmd
 		Read,
 		WProc,
 		RProc,
-
-		// Filter operands
-
-		Check,
-		Conditional,
 
 		// Filters
 

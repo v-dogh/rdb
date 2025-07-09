@@ -290,152 +290,234 @@ namespace rdb
 		return true;
 	}
 
-	std::size_t Mount::_query_parse_operand(std::span<const unsigned char> packet, ParserState& state, ParserInfo inf) noexcept
+	std::tuple<std::size_t, schema_type, const RuntimeSchemaReflection::RTSI*> Mount::_query_parse_op_rtsi(std::span<const unsigned char> packet, ParserState& state, ParserInfo info) noexcept
 	{
-		const auto op = cmd::qOp(packet[0]);
-		std::size_t off = sizeof(cmd::qOp);
-
-		// Extract keys
-
-		if (packet.size() < sizeof(cmd::qOp) + sizeof(key_type) + sizeof(schema_type))
-			return packet.size();
-
-		const auto schema = byte::sread<schema_type>(packet.data(), off);
-		const auto* info = RuntimeSchemaReflection::fetch(schema);
-		if (info == nullptr)
+		std::size_t off = 0;
+		const auto schema = byte::sread<schema_type>(packet, off);
+		const auto* inf = RuntimeSchemaReflection::fetch(schema);
+		if (inf == nullptr)
 		{
 			RDB_WARN("Unrecognized schema passed to query parser")
-			return packet.size();
+			return { packet.size(), 0, nullptr };
 		}
+		return { off, schema, inf };
+	}
+	std::tuple<std::size_t, View, key_type> Mount::_query_parse_op_pkey(std::span<const unsigned char> packet, const RuntimeSchemaReflection::RTSI& inf, ParserState& state, ParserInfo info) noexcept
+	{
+		std::tuple<std::size_t, View, key_type> result{};
+		auto& [ off, val, key ] = result;
 
-		key_type key = 0x00;
-		View pkey = nullptr;
-		View sort = nullptr;
-		// Get partition key
-		{
-			const auto size = info->partition_size(
-				packet.subspan(off).data()
-			);
-			pkey = View::view(packet.subspan(off, size));
-			off += size;
-			key = info->hash_partition(pkey.data().data());
-		}
+		const auto size = inf.partition_size(
+			packet.subspan(off).data()
+		);
+		val = View::view(packet.subspan(off, size));
+		off += size;
+		key = inf.hash_partition(val.data().data());
 
-		// Get sort keys
-		if (info->skeys() &&
-			(op == cmd::qOp::Fetch || op == cmd::qOp::Check ||
-			op == cmd::qOp::Remove ||
-			op == cmd::qOp::PageFrom))
+		return result;
+	}
+	std::tuple<std::size_t, View> Mount::_query_parse_op_skey(std::span<const unsigned char> packet, const RuntimeSchemaReflection::RTSI& inf, ParserState& state, ParserInfo info) noexcept
+	{
+		std::tuple<std::size_t, View> result{};
+		auto& [ off, sort ] = result;
+
+		if (inf.skeys())
 		{
 			const auto size = byte::sread<std::uint32_t>(packet, off);
 			sort = View::view(packet.subspan(off, size));
 			off += size;
 		}
 
-		if (op == cmd::qOp::Fetch ||
-			op == cmd::qOp::Check)
-		{
-			if (op == cmd::qOp::Fetch)
-			{
-				std::size_t coff = 0;
-				while ((coff = _query_parse_schema_operator(
-						packet.subspan(off),
-						key, pkey, sort,
-						schema,
-						state,
-						inf
-					)) != ~0ull)
-				{
-					off += coff;
-					if (off >= packet.size())
-						break;
-				}
-			}
-			else if (op == cmd::qOp::Check)
-			{
-				std::size_t coff = 0;
-				while ((coff = _query_parse_predicate_operator(
-						packet.subspan(off),
-						key, pkey, sort,
-						schema,
-						state,
-						inf
-					)) != ~0ull)
-				{
-					off += coff;
-					if (off >= packet.size())
-						break;
-				}
-			}
-		}
-		else if (op == cmd::qOp::Create ||
-				 op == cmd::qOp::Remove)
-		{
-			auto& core = _threads[_vcpu(key)];
+		return result;
+	}
 
-			if (op == cmd::qOp::Create)
-			{
-				View data = nullptr;
-				{
-					data = View::view(
-						packet.subspan(
-							off,
-							info->storage(packet.data() + off)
-						)
-					);
-					off += data.size();
-				}
+	std::size_t Mount::_query_parse_op_fetch(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept
+	{
+		std::size_t off = 0;
 
-				state.acquire();
-				core.launch(Thread::task(schema, [=, &state, this](MemoryCache* cache) {
-					cache->write(
-						WriteType::Table,
-						key, pkey, nullptr,
-						data
-					);
-					state.release();
-				}));
-			}
-			else if (op == cmd::qOp::Remove)
-			{
-				state.acquire();
-				core.launch(Thread::task(schema, [=, &state, this](MemoryCache* cache) {
-					cache->remove(key, sort);
-					state.release();
-				}));
-			}
-		}
-		else if (op == cmd::qOp::PageFrom ||
-				 op == cmd::qOp::Page)
+		const auto [ off1, schema, inf ] = _query_parse_op_rtsi(packet, state, info); off += off1;
+		if (inf == nullptr) return off1;
+		const auto [ off2, pkey, key ] = _query_parse_op_pkey(packet, *inf, state, info); off += off2;
+		const auto [ off3, sort ] = _query_parse_op_skey(packet, *inf, state, info); off += off3;
+
+		std::size_t coff = 0;
+		while ((coff = _query_parse_schema_operator(
+				packet.subspan(off),
+				key, pkey, sort,
+				schema,
+				state,
+				cfi,
+				info
+			)) != ~0ull)
 		{
-			auto& core = _threads[_vcpu(key)];
-			const auto count = byte::sread<std::uint32_t>(packet, off);
-			state.acquire();
-			core.launch(Thread::task(schema, [=, &state, this](MemoryCache* cache) {
-				if (op == cmd::qOp::Page)
-				{
-					state.push(cache->page(key, count), ParserInfo{
-						.operand_idx = inf.operand_idx,
-						.operator_idx = 0
-					});
-				}
-				else if (op == cmd::qOp::PageFrom)
-				{
-					state.push(cache->page_from(key, sort, count), ParserInfo{
-						.operand_idx = inf.operand_idx,
-						.operator_idx = 0
-					});
-				}
-				state.release();
-			}));
+			off += coff;
+			if (off >= packet.size())
+				break;
 		}
+
 		return off;
 	}
-	std::size_t Mount::_query_parse_schema_operator(std::span<const unsigned char> packet, key_type key, View partition, View sort, schema_type schema, ParserState& state, ParserInfo& info) noexcept
+	std::size_t Mount::_query_parse_op_create(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept
 	{
-		const auto op = cmd::qOp(packet[0]);
+		std::size_t off = 0;
+
+		const auto [ off1, schema, inf ] = _query_parse_op_rtsi(packet, state, info); off += off1;
+		if (inf == nullptr) return off1;
+		const auto [ off2, pkey, key ] = _query_parse_op_pkey(packet, *inf, state, info); off += off2;
+
 		auto& core = _threads[_vcpu(key)];
-		std::size_t off = sizeof(cmd::qOp);
+
+		View data = View::view(
+			packet.subspan(
+				off,
+				inf->storage(packet.data() + off)
+			)
+		);
+		off += data.size();
+
+		state.acquire();
+		core.launch(Thread::task(schema, [=, &state, this](MemoryCache* cache) {
+			cache->write(
+				WriteType::Table,
+				key, pkey, nullptr,
+				data
+			);
+			state.release();
+		}));
+
+		return off;
+	}
+	std::size_t Mount::_query_parse_op_remove(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept
+	{
+		std::size_t off = 0;
+
+		const auto [ off1, schema, inf ] = _query_parse_op_rtsi(packet, state, info); off += off1;
+		if (inf == nullptr) return off1;
+		const auto [ off2, pkey, key ] = _query_parse_op_pkey(packet, *inf, state, info); off += off2;
+		const auto [ off3, sort ] = _query_parse_op_skey(packet, *inf, state, info); off += off3;
+
+		auto& core = _threads[_vcpu(key)];
+
+		state.acquire();
+		core.launch(Thread::task(schema, [=, &state, this](MemoryCache* cache) {
+			cache->remove(key, sort);
+			state.release();
+		}));
+
+		return off;
+	}
+	std::size_t Mount::_query_parse_op_page(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept
+	{
+		std::size_t off = 0;
+
+		const auto [ off1, schema, inf ] = _query_parse_op_rtsi(packet, state, info); off += off1;
+		if (inf == nullptr) return off1;
+		const auto [ off2, pkey, key ] = _query_parse_op_pkey(packet, *inf, state, info); off += off2;
+		const auto [ off3, sort ] = _query_parse_op_skey(packet, *inf, state, info); off += off3;
+
+		auto& core = _threads[_vcpu(key)];
+		const auto count = byte::sread<std::uint32_t>(packet, off);
+		state.acquire();
+		core.launch(Thread::task(schema, [=, &state, this](MemoryCache* cache) {
+			state.push(cache->page(key, count), ParserInfo{
+				.operand_idx = info.operand_idx,
+				.operator_idx = 0
+			});
+			state.release();
+		}));
+
+		return off;
+	}
+	std::size_t Mount::_query_parse_op_page_from(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept
+	{
+		std::size_t off = 0;
+
+		const auto [ off1, schema, inf ] = _query_parse_op_rtsi(packet, state, info); off += off1;
+		if (inf == nullptr) return off1;
+		const auto [ off2, pkey, key ] = _query_parse_op_pkey(packet, *inf, state, info); off += off2;
+		const auto [ off3, sort ] = _query_parse_op_skey(packet, *inf, state, info); off += off3;
+
+		auto& core = _threads[_vcpu(key)];
+		const auto count = byte::sread<std::uint32_t>(packet, off);
+		state.acquire();
+		core.launch(Thread::task(schema, [=, &state, this](MemoryCache* cache) {
+			state.push(cache->page_from(key, sort, count), ParserInfo{
+				.operand_idx = info.operand_idx,
+				.operator_idx = 0
+			});
+			state.release();
+		}));
+
+		return off;
+	}
+	std::size_t Mount::_query_parse_op_check(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept
+	{
+		std::size_t off = 0;
+
+		const auto [ off1, schema, inf ] = _query_parse_op_rtsi(packet, state, info); off += off1;
+		if (inf == nullptr) return off1;
+		const auto [ off2, pkey, key ] = _query_parse_op_pkey(packet, *inf, state, info); off += off2;
+		const auto [ off3, sort ] = _query_parse_op_skey(packet, *inf, state, info); off += off3;
+
+		std::size_t coff = 0;
+		while ((coff = _query_parse_predicate_operator(
+				packet.subspan(off),
+				key, pkey, sort,
+				schema,
+				state,
+				cfi,
+				info
+			)) != ~0ull)
+		{
+			off += coff;
+			if (off >= packet.size())
+				break;
+		}
+
+		return off;
+	}
+	std::size_t Mount::_query_parse_op_if(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo&, ParserInfo info) noexcept
+	{
+		std::size_t off = 0;
+
+		ControlFlowInfo cfi;
+		cfi.set_chain(byte::sread<std::uint32_t>(packet, off));
+
+		[[ likely ]] if (const auto op = packet[off++]; op < _op_parse_table.size())
+		{
+			const auto func = _op_parse_table[op];
+			off += (this->*func)(packet.subspan(off), state, cfi, info);
+		}
+		if (const auto op = packet[off++]; op < _op_parse_table.size() && cfi.get())
+		{
+			const auto func = _op_parse_table[op];
+			off += (this->*func)(packet.subspan(off), state, cfi, info);
+			return off;
+		}
+		else
+			return cfi.get_chain() + sizeof(std::uint32_t);
+	}
+	std::size_t Mount::_query_parse_op_barrier(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept
+	{
+		state.wait();
+	}
+
+	std::size_t Mount::_query_parse_operand(std::span<const unsigned char> packet, ParserState& state, ParserInfo info) noexcept
+	{
+		std::size_t off = 0;
+		[[ likely ]] if (const auto op = packet[off++]; op < _op_parse_table.size())
+		{
+			ControlFlowInfo cfi;
+			const auto func = _op_parse_table[op];
+			return (this->*func)(packet.subspan(off), state, cfi, info);
+		}
+		return ~0ull;
+	}
+	std::size_t Mount::_query_parse_schema_operator(std::span<const unsigned char> packet, key_type key, View partition, View sort, schema_type schema, ParserState& state, ControlFlowInfo& cfi, ParserInfo& info) noexcept
+	{
+		auto& core = _threads[_vcpu(key)];
+		std::size_t off = 0;
+		const auto op = cmd::qOp(packet[off++]);
 		if (op == cmd::qOp::Reset)
 		{
 			state.acquire();
@@ -518,17 +600,18 @@ namespace rdb
 		}
 		return off;
 	}
-	std::size_t Mount::_query_parse_predicate_operator(std::span<const unsigned char> packet, key_type key, View partition, View sort, schema_type schema, ParserState& state, ParserInfo& info) noexcept
+	std::size_t Mount::_query_parse_predicate_operator(std::span<const unsigned char> packet, key_type key, View partition, View sort, schema_type schema, ParserState& state, ControlFlowInfo& cfi, ParserInfo& info) noexcept
 	{
-		const auto op = cmd::qOp(packet[0]);
 		auto& core = _threads[_vcpu(key)];
-		std::size_t off = sizeof(cmd::qOp);
+		std::size_t off = 0;
+		const auto op = cmd::qOp(packet[off++]);
 		if (op == cmd::qOp::FilterExists)
 		{
 			const auto op_idx = info.operator_idx++;
 			state.acquire();
-			core.launch(Thread::task(schema, [=, &state, this](MemoryCache* cache) {
+			core.launch(Thread::task(schema, [=, order = cfi.order(), &cfi, &state, this](MemoryCache* cache) {
 				const auto result = cache->exists(key, sort);
+				cfi.set(result, order);
 				auto v = View::copy(1);
 				v.mutate()[0] = static_cast<unsigned char>(result);
 				state.push(std::move(v), ParserInfo{
@@ -537,6 +620,12 @@ namespace rdb
 				});
 				state.release();
 			}));
+		}
+		else if (op == cmd::qOp::Invert)
+		{
+			cfi.set_filter([](bool o, bool n) {
+				return !n;
+			});
 		}
 		else
 		{

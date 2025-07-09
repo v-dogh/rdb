@@ -25,36 +25,201 @@
 // does _read_impl assume that the sort key is alongside each instance's data buffer (after the DataType)???
 // Does _data_impl ensure that it is present in each of the instances on disk???
 
+using server = rdb::Schema<"Server",
+	rdb::Topology<
+		rdb::Field<"ServerID", rdbt::TimeUUID>
+	>,
+	rdb::Topology<
+		rdb::Field<"Name", rdbt::String>,
+		rdb::Field<"Key", rdbt::BinaryArray<32>>,
+		rdb::Field<"Roles", rdbt::Uint64>,
+		rdb::Field<"Members", rdbt::Uint64>,
+		rdb::Field<"Channels", rdbt::Uint64>,
+		rdb::Field<"Icon", rdbt::Binary>
+	>
+>;
+using server_by_name = rdb::Schema<"ServerByName",
+	rdb::Topology<rdb::Field<"Name", rdbt::String>>,
+	rdb::Topology<rdb::Field<"ServerID", rdbt::TimeUUID>>
+>;
+using server_user_index = rdb::Schema<"ServerUserIndex",
+	rdb::Topology<
+		rdb::Field<"ServerID", rdbt::TimeUUID>
+	>,
+	rdb::Topology<
+		rdb::Field<"Hierarchy", rdbt::Uint64, rdb::FieldType::Sort>,
+		rdb::Field<"Role", rdbt::TimeUUID, rdb::FieldType::Sort>,
+		rdb::Field<"UserID", rdbt::TimeUUID, rdb::FieldType::Sort>,
+		rdb::Field<"Name", rdbt::String>
+	>
+>;
+
+using channel = rdb::Schema<"Channel",
+	rdb::Topology<
+		rdb::Field<"ServerID", rdbt::TimeUUID>
+	>,
+	rdb::Topology<
+		rdb::Field<"ID", rdbt::TimeUUID, rdb::FieldType::Sort>,
+		rdb::Field<"Name", rdbt::String>,
+		rdb::Field<"Type", rdbt::String>,
+		rdb::Field<"ContentCounter", rdbt::Uint64>
+	>
+>;
+using channel_by_name = rdb::Schema<"ChannelByName",
+	rdb::Topology<
+		rdb::Field<"ServerID", rdbt::TimeUUID>,
+		rdb::Field<"Name", rdbt::String>
+	>,
+	rdb::Topology<rdb::Field<"ChannelID", rdbt::TimeUUID>>
+>;
+
+// Three types
+// Hierarchy goes from 0 -> highest
+// 1. server permissions
+// Set globally for the entire server
+// Cannot be overriden
+// Set   -> allow
+// Unset -> deny
+//  0 - owner
+//  1 - administrator
+//  2 - manage server
+//  3 - manage roles
+//  4 - manage channels
+//  5 - manage invites
+//  6 - create invites
+//  7 - manage emojis
+//  8 - view audit log
+//  9 - view server analytics
+// 10 - manage events
+// 11 - manage applications
+// 12 - manage security
+// ...
+// 2. channel permissions
+// Channel overrides are specific to channel types
+// Set globally for the entire server
+// Can be overriden with channel overrides
+// Two bitsets
+// <1> Set -> allow
+// <2> Set -> deny
+// Both unset -> inherit (here inherit from other roles in the hierarchy)
+// 3. channel overrides
+// Same as above but are higher in hierarchy
+// I.e. channel overrides have more weight then channel permissions
+// Here the meaning of inherit first applies for other roles in the hierarchy
+// for channel overrides and then in the hierarchy of channel permissions
+// For text channels:
+//  0 - read messages
+//  1 - send messages
+//  2 - reply
+//  3 - embed links
+//  4 - send attachments
+//  5 - react
+//  6 - use external emojis
+//  7 - mention everyone
+//  8 - mention
+//  9 - manage messages
+// 10 - pin messages
+// 13 - write threads
+// 14 - read threads
+// 14 - use commands
+// 15 - view history
+// 16 - bypass slowmode
+// ...
+
+// Channel control
+
+using role = rdb::Schema<"Role",
+	rdb::Topology<
+		rdb::Field<"ServerID", rdbt::RandUUID>
+	>,
+	rdb::Topology<
+		rdb::Field<"ID", rdbt::TimeUUID, rdb::FieldType::Sort>,
+		rdb::Field<"Name", rdbt::String>,
+		rdb::Field<"Permissions", rdbt::Bitset<64>>,
+		rdb::Field<"ChannelPermsAllow", rdbt::Bitset<64>>,
+		rdb::Field<"ChannelPermsDeny", rdbt::Bitset<64>>,
+		rdb::Field<"Hierarchy", rdbt::Uint64>,
+		rdb::Field<"Color", rdbt::Uint32>
+	>
+>;
+using channel_role = rdb::Schema<"ChannelRole",
+	rdb::Topology<
+		rdb::Field<"ServerID", rdbt::RandUUID>,
+		rdb::Field<"ChannelID", rdbt::RandUUID>
+	>,
+	rdb::Topology<
+		rdb::Field<"ID", rdbt::TimeUUID, rdb::FieldType::Sort>,
+		rdb::Field<"ChannelPermsAllow", rdbt::Bitset<64>>,
+		rdb::Field<"ChannelPermsDeny", rdbt::Bitset<64>>
+	>
+>;
+
+using global_entity = rdb::Schema<"GlobalEntity",
+	rdb::Topology<
+		rdb::Field<"UserID", rdbt::TimeUUID>
+	>,
+	rdb::Topology<
+		rdb::Field<"Name", rdbt::String>,
+		rdb::Field<"Friends", rdbt::Buffer<rdbt::TimeUUID>>,
+		rdb::Field<"Servers", rdbt::Buffer<rdbt::RandUUID>>,
+		rdb::Field<"OwnedServers", rdbt::Uint64>,
+		rdb::Field<"Flags", rdbt::Bitset<32>>
+	>
+>;
+using entity = rdb::Schema<"Entity",
+	rdb::Topology<
+		rdb::Field<"ServerID", rdbt::TimeUUID>
+	>,
+	rdb::Topology<
+		rdb::Field<"UserID", rdbt::TimeUUID, rdb::FieldType::Sort>,
+		rdb::Field<"Roles", rdbt::Buffer<rdbt::TimeUUID>>,
+		rdb::Field<"Joined", rdbt::Timestamp>
+	>
+>;
+
+using message = rdb::Schema<"Message",
+	rdb::Topology<
+		rdb::Field<"ServerID", rdbt::TimeUUID>,
+		rdb::Field<"ChannelID", rdbt::TimeUUID>,
+		rdb::Field<"DayBucket", rdbt::Timestamp>
+	>,
+	rdb::Topology<
+		rdb::Field<"ID", rdbt::TimeUUID, rdb::FieldType::Sort, rdb::Order::Descending>,
+		rdb::Field<"SenderID", rdbt::TimeUUID>,
+		rdb::Field<"Flags", rdbt::Bitset<32>>,
+		rdb::Field<"Message", rdbt::Binary>,
+		rdb::Field<"Resources", rdbt::Nullable<rdbt::Buffer<rdbt::TimeUUID>>>
+	>
+>;
+using attachment = rdb::Schema<"Attachment",
+	rdb::Topology<
+		rdb::Field<"ServerID", rdbt::TimeUUID>,
+		rdb::Field<"ChannelID", rdbt::TimeUUID>
+	>,
+	rdb::Topology<
+		rdb::Field<"ID", rdbt::TimeUUID, rdb::FieldType::Sort>,
+		rdb::Field<"SenderID", rdbt::TimeUUID>,
+		rdb::Field<"Data", rdbt::Binary>
+	>
+>;
+
 int main()
 {
 	std::filesystem::remove_all("/tmp/RDB");
 
-	// using message = rdb::Schema<"Message",
-	// 	rdb::Topology<
-	// 		rdb::Field<"ServerID", rdbt::RandUUID>,
-	// 		rdb::Field<"ChannelID", rdbt::RandUUID>,
-	// 		rdb::Field<"DayBucket", rdbt::Timestamp>
-	// 	>,
-	// 	rdb::Topology<
-	// 		rdb::Field<"ID", rdbt::TimeUUID, rdb::FieldType::Sort, rdb::Order::Descending>,
-	// 		rdb::Field<"SenderID", rdbt::TimeUUID>,
-	// 		rdb::Field<"Flags", rdbt::Bitset<32>>,
-	// 		rdb::Field<"Message", rdbt::Binary>,
-	// 		rdb::Field<"Resources", rdbt::Nullable<rdbt::Buffer<rdbt::TimeUUID>>>
-	// 	>
-	// >;
-	// rdb::require<message>();
-
-	using test = rdb::Schema<"Test",
-		rdb::Topology<
-			rdb::Field<"Key", rdbt::String>
-		>,
-		rdb::Topology<
-			rdb::Field<"Val", rdbt::String, rdb::FieldType::Sort>,
-			rdb::Field<"Val2", rdbt::Uint64>
-		>
-	>;
-	rdb::require<test>();
+	rdb::require<
+		server,
+		server_by_name,
+		server_user_index,
+		channel,
+		channel_by_name,
+		role,
+		channel_role,
+		global_entity,
+		entity,
+		message,
+		attachment
+	>();
 
 	rdb::Mount::ptr mnt =
 		rdb::Mount::make({
@@ -65,26 +230,54 @@ int main()
 		});
 	mnt->start();
 
-	mnt->query
-		<< rdb::create<test>(std::string_view("Key"), std::string_view("SKey"), 1)
-		<< rdb::execute<>;
+	const auto name = std::string_view("ABCD");
+	const auto uid = rdbt::TimeUUID::id();
+	const auto username = "Dog";
+	const auto id = rdbt::TimeUUID::id();
+	const auto created = rdbt::Timestamp::now();
+	const auto key = std::array<unsigned char, 32>();
 
-	mnt->run<test>([](rdb::MemoryCache* cache) {
-		cache->flush();
-	});
-	std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-
-	test::interface_view<"Val2"> result;
+	bool result = false;
 	mnt->query
-		<< rdb::compose(
-			rdb::fetch<test>(std::string_view("Key"), std::string_view("SKey"))
-			| rdb::read<"Val2">(&result)
+		<< rdb::pred(
+			rdb::check<server_by_name>(&result, name)
+			   < rdb::invert(rdb::exists),
+			// Create server
+			rdb::create<server>(
+				id,
+				name,
+				std::span<const unsigned char>(key),
+				1, 1, 0,
+				std::span<const unsigned char>()
+			)/*,
+			// Index by name
+			rdb::create<server_by_name>(name, id),
+			// Increment creator server count and push server to list
+			rdb::fetch<global_entity>(uid)
+				| rdb::wproc<"OwnedServers", rdbt::Uint64::Op::Add>(1)
+				| rdb::wproc<"Servers", rdbt::Buffer<rdbt::RandUUID>::Op::Push>(id),
+			// Create owner role
+			rdb::create<role>(
+				id, id,
+				std::string_view("Owner"),
+				rdbt::Bitset<64>::list{ true },
+				rdbt::Bitset<64>::list{},
+				rdbt::Bitset<64>::list{},
+				0, ~std::uint32_t(0)
+			),
+			// Index user
+			rdb::create<server_user_index>(
+				id, 0, id, uid,
+				username
+			),
+			// Give user the owner role
+			rdb::create<entity>(
+				id, uid,
+				rdbt::Buffer<rdbt::TimeUUID>::trivial_list{{ id }},
+				created
+			)*/
 		)
-		<< rdb::execute<>;
-
-	std::cout
-		<< (result == nullptr ? std::string("<null>") : result->print())
-		<< std::endl;
+		<< rdb::execute<rdb::Policy::Atomic>;
 
 	// rdb::CTL::ptr ctl = rdb::CTL::make(mnt);
 	// {

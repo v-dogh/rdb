@@ -141,7 +141,7 @@ namespace rdb
 		template<typename... Ops>
 		struct OperationChain :
 			OperationChainTrait,
-			std::conditional_t<std::is_base_of_v<ControlFlowTrait, std::tuple_element_t<0, std::tuple<Ops...>>>, ControlFlowTrait, FallbackTrait>
+			std::conditional_t<std::is_base_of_v<ControlFlowTrait, std::remove_cvref_t<std::tuple_element_t<0, std::tuple<Ops...>>>>, ControlFlowTrait, FallbackTrait>
 		{
 			template<typename... Op> using append_ops = OperationChain<Ops..., Op...>;
 			template<typename... Op> using pre_append_ops = OperationChain<Op..., Ops...>;
@@ -190,7 +190,7 @@ namespace rdb
 					return
 						(ops.size() + ...) +
 						sizeof...(Ops) +
-						((sizeof(std::uint32_t) * std::is_base_of_v<ControlFlowTrait, Ops>) + ...);
+						((sizeof(std::uint32_t) * std::is_base_of_v<ControlFlowTrait, std::remove_cvref_t<Ops>>) + ...);
 				}, ops);
 			}
 			constexpr void fill(std::span<unsigned char> buffer) noexcept
@@ -199,7 +199,7 @@ namespace rdb
 					std::size_t idx = 0;
 					([&]<typename Type>(Type& op) {
 						buffer[idx++] = char(Type::op);
-						if constexpr (std::is_base_of_v<ControlFlowTrait, Ops>)
+						if constexpr (std::is_base_of_v<ControlFlowTrait, Type>)
 							idx += byte::swrite<std::uint32_t>(buffer, idx, size() - idx - sizeof(std::uint32_t));
 						idx += op.fill(buffer.subspan(idx));
 					}(ops), ...);
@@ -1153,8 +1153,8 @@ namespace rdb
 				const auto base_size = cmd::size(cmd);
 				const auto size = base_size +
 					sizeof(OperandFlags) +
-					sizeof(cmd::qOp) * !skip_op +
-					sizeof(std::uint32_t) * !skip_size;
+					(sizeof(cmd::qOp) * !skip_op) +
+					(sizeof(std::uint32_t) * !skip_size);
 				const auto buffer = _qbuffer(size);
 
 				// Metadata
