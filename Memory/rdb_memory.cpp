@@ -19,6 +19,7 @@ namespace rdb
 		_readonly_maps = std::move(copy._readonly_maps);
 		_handle_cache = std::move(copy._handle_cache);
 		_handle_cache_tracker = std::move(copy._handle_cache_tracker);
+		_flush_thread = std::move(copy._flush_thread);
 		_mappings = copy._mappings;
 		_descriptors = copy._descriptors;
 		_flush_id = copy._flush_id.load();
@@ -112,6 +113,11 @@ namespace rdb
 				}
 			});
 		}
+	}
+	MemoryCache::~MemoryCache()
+	{
+		_shutdown = true;
+		_flush_tasks.enqueue(nullptr, 0);
 	}
 
 	RuntimeSchemaReflection::RTSI& MemoryCache::_info() const noexcept
@@ -2080,7 +2086,28 @@ namespace rdb
 	void MemoryCache::_flush_if() noexcept
 	{
 		[[ unlikely ]] if (_pressure > _cfg->cache.flush_pressure)
+		{
+			[[ unlikely ]] if (!_flush_thread.joinable())
+			{
+				_flush_thread = std::jthread([this]() {
+					while (!_shutdown)
+					{
+						std::pair<std::shared_ptr<write_store>, std::size_t> flush_data;
+						auto& [ map, id ] = flush_data;
+						if (_flush_tasks.dequeue(flush_data) && flush_data.first != nullptr)
+						{
+							_flush_impl(*map, id);
+							_logs.mark(id);
+							RDB_FMT("VCPU{} MC FLUSH{} END", _id, id)
+							_handle_cache[id].unlocked.store(true, std::memory_order::release);
+							--_flush_running;
+							_flush_running.notify_all();
+						}
+					}
+				});
+			}
 			flush();
+		}
 	}
 
 	void MemoryCache::flush() noexcept
@@ -2093,14 +2120,7 @@ namespace rdb
 		_logs.snapshot(_flush_id);
 		_handle_reserve();
 		RDB_FMT("VCPU{} MC FLUSH{} BEGIN {}b", _id, _flush_id.load(), _pressure)
-		std::thread([map = _map, this, id = _flush_id++]() {
-			_flush_impl(*map, id);
-			_logs.mark(id);
-			RDB_FMT("VCPU{} MC FLUSH{} END", _id, id)
-			_handle_cache[id].unlocked.store(true, std::memory_order::release);
-			--_flush_running;
-			_flush_running.notify_all();
-		}).detach();
+		_flush_tasks.enqueue(_map, _flush_id++);
 
 		_pressure = 0;
 		_map = std::make_shared<write_store>();

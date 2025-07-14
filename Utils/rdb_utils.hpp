@@ -734,6 +734,7 @@ namespace rdb
 	namespace util
 	{
 		void spinlock_yield() noexcept;
+		void bind_thread(std::size_t core) noexcept;
 
 		template<typename Type>
 		void nano_wait_for(const std::atomic<Type>& var, const Type& value, std::memory_order order = std::memory_order::acquire) noexcept

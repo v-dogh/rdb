@@ -63,9 +63,10 @@ namespace rdb
 				OptimizeSpeed,
 				OptimizeUsage
 			};
+			static inline auto default_cores = std::thread::hardware_concurrency();
 
 			// Number of cores for the database to distribute load
-			std::size_t cores{ std::thread::hardware_concurrency() };
+			std::size_t cores{ default_cores };
 			// Whether to enable NUMA awareness
 			bool numa{ true };
 			// Optimizes for chosen qualities when it comes to CPU usage

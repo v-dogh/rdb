@@ -4,13 +4,6 @@
 #include <rdb_locale.hpp>
 #include <limits>
 #include <format>
-#ifdef __unix__
-#include <pthread.h>
-#include <sched.h>
-#include <unistd.h>
-#else
-#error(Unsupported Platform)
-#endif
 
 namespace rdb
 {
@@ -63,13 +56,7 @@ namespace rdb
 				}
 				else if (_cfg.mnt.numa)
 				{
-#					ifdef __unix__
-						cpu_set_t set;
-						CPU_ZERO(&set);
-						CPU_SET(i, &set);
-						pthread_t thread = pthread_self();
-						pthread_setaffinity_np(thread, sizeof(set), &set);
-#					endif
+					util::bind_thread(i);
 				}
 
 				ct::hash_map<schema_type, MemoryCache> schemas;

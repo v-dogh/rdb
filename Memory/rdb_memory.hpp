@@ -11,6 +11,7 @@
 #include <rdb_keytype.hpp>
 #include <rdb_log.hpp>
 #include <rdb_containers.hpp>
+#include <rdb_task_ring.hpp>
 
 namespace rdb
 {
@@ -261,6 +262,10 @@ namespace rdb
 		mutable RuntimeSchemaReflection::RTSI* _schema_info{ nullptr };
 		mutable std::size_t _schema_version{ 0 };
 
+		std::atomic<bool> _shutdown{ false };
+		std::jthread _flush_thread{};
+		ct::TaskRing<std::pair<std::shared_ptr<write_store>, std::size_t>, 4> _flush_tasks{};
+
 		std::size_t _pressure{ 0 };
 		std::size_t _id{ 0 };
 		std::size_t _lock_cnt{ 0 };
@@ -352,6 +357,7 @@ namespace rdb
 		{
 			_move(std::move(copy));
 		}
+		~MemoryCache();
 
 		std::size_t core() const noexcept;
 		std::size_t pressure() const noexcept;

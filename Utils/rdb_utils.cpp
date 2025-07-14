@@ -13,6 +13,9 @@
 #include <net/if.h>
 #include <netpacket/packet.h>
 #include <sys/random.h>
+#include <pthread.h>
+#include <sched.h>
+#include <unistd.h>
 #else
 #error(Unsupported platform)
 #endif
@@ -242,6 +245,16 @@ namespace rdb
 				__builtin_ia32_pause();
 #			else
 				std::this_thread::yield();
+#			endif
+		}
+		void bind_thread(std::size_t core) noexcept
+		{
+#			ifdef __unix__
+				cpu_set_t set;
+				CPU_ZERO(&set);
+				CPU_SET(core, &set);
+				pthread_t thread = pthread_self();
+				pthread_setaffinity_np(thread, sizeof(set), &set);
 #			endif
 		}
 	}

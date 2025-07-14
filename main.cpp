@@ -144,12 +144,7 @@ int main()
 
 	rdb::Mount::ptr mnt = rdb::Mount::make(
 		rdb::Config{
-			.root = "/tmp/RDB",
-			.mnt{
-				.cores = 1,
-				.numa = true,
-				.cpu_profile = rdb::Config::Mount::CPUProfile::OptimizeSpeed
-			}
+			.root = "/tmp/RDB"
 		}
 	);
 	mnt->start();
@@ -170,32 +165,6 @@ int main()
 	const auto created = rdbt::Timestamp::now();
 	const auto key = std::span<const unsigned char>();
 	const auto icon = std::span<const unsigned char>();
-
-
-	// {
-	// 	const auto key = server::partition::make(id);
-	// 	const auto value = server::make(name, key, 1, 1, 0, icon);
-
-	// 	mnt->run<server>([&](rdb::MemoryCache* cache) {});
-
-	// 	std::atomic<bool> finished = false;
-	// 	std::cout << rdb::util::measure([&]() {
-	// 		mnt->run<server>([&](rdb::MemoryCache* cache) {
-	// 			cache->write(
-	// 				rdb::WriteType::Table,
-	// 				key->hash(),
-	// 				key, nullptr,
-	// 				value,
-	// 				rdb::MemoryCache::origin()
-	// 			);
-	// 			finished.store(true, std::memory_order::release);
-	// 		});
-	// 		while (!finished.load(std::memory_order::acquire));
-	// 		finished = false;
-	// 	}, 10'000) << std::endl;
-
-	// 	mnt->wait();
-	// }
 
 	bool result = false;
 	mnt->query
