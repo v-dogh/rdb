@@ -121,7 +121,7 @@ namespace rdb
 			}
 			_current = _path/std::format("s{}", _shard++);
 			_smap.open(_current.c_str());
-			_smap.reserve(_cfg->logs.log_shard_size);
+			_smap.reserve(_shared.cfg->logs.log_shard_size);
 			_shard_offset = 0;
 		}
 

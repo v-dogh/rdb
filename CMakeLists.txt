@@ -12,6 +12,7 @@ set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
 # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${ASAN_FLAGS}")
 # set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${ASAN_FLAGS}")
 
+add_compile_definitions(RDB_RUNTIME_LOGS)
 add_subdirectory(External/Snappy)
 add_subdirectory(External/AbseilCpp)
 add_subdirectory(External/LibART)
@@ -78,6 +79,8 @@ add_executable(RDB main.cpp
     Utils/rdb_locale.hpp
     Utils/rdb_locale.cpp
     Utils/rdb_memunits.hpp
+    Utils/rdb_runtime_logs.hpp
+    Utils/rdb_runtime_logs.cpp
     Utils/rdb_dbg.hpp
 )
 

@@ -1,15 +1,15 @@
 #ifndef RDB_MOUNT_HPP
 #define RDB_MOUNT_HPP
 
-#include <memory_resource>
 #include <condition_variable>
+#include <memory_resource>
+#include <functional>
 #include <memory>
 #include <vector>
-#include <functional>
-#include <rdb_memory.hpp>
 #include <rdb_root_config.hpp>
-#include <rdb_dsl.hpp>
 #include <rdb_task_ring.hpp>
+#include <rdb_memory.hpp>
+#include <rdb_dsl.hpp>
 
 namespace rdb
 {
@@ -160,6 +160,7 @@ namespace rdb
 			std::atomic<std::size_t> resolved{ 0 };
 			Mapper data{};
 		};
+
 		enum class QueryLogToken : unsigned char
 		{
 			Invalid,
@@ -183,8 +184,8 @@ namespace rdb
 		// Other stuff
 
 		std::vector<Thread> _threads{};
-		Config _cfg{};
 		Status _status{ Status::Stopped };
+		Shared _shared{};
 
 		query_log_id _log_query(std::span<const unsigned char> packet) noexcept;
 		void _resolve_query(query_log_id id) noexcept;
@@ -227,13 +228,13 @@ namespace rdb
 		friend class QueryEngine;
 		QueryEngine& query{ *this };
 
-		static auto make(Config cfg) noexcept
+		static auto make(Config cfg)
 		{
 			return std::make_shared<Mount>(cfg);
 		}
 
 		Mount() = default;
-		Mount(Config cfg) : _cfg(cfg) {}
+		Mount(Config cfg);
 		Mount(const Mount&) = delete;
 		Mount(Mount&&) = delete;
 		~Mount()
@@ -245,6 +246,7 @@ namespace rdb
 		Config& cfg() noexcept;
 
 		std::size_t cores() const noexcept;
+		rs::RuntimeLogs::ptr logs() const noexcept;
 
 		void start() noexcept;
 		void stop() noexcept;

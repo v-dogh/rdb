@@ -9,25 +9,38 @@ namespace rdb
 {
 	const Config& Mount::cfg() const noexcept
 	{
-		return _cfg;
+		return *_shared.cfg;
 	}
 	Config& Mount::cfg() noexcept
 	{
-		return _cfg;
+		return *_shared.cfg;
+	}
+
+	Mount::Mount(Config cfg)
+	{
+		_shared.cfg = std::make_shared<Config>(std::move(cfg));
+		auto lcfg = _shared.cfg->rlog;
+		lcfg.root = _shared.cfg->root/"logs";
+		_shared.logs = rs::RuntimeLogs::make(std::move(lcfg));
 	}
 
 	std::size_t Mount::cores() const noexcept
 	{
 		return _threads.size();
 	}
+	rs::RuntimeLogs::ptr Mount::logs() const noexcept
+	{
+		return _shared.logs;
+	}
 
 	void Mount::start() noexcept
 	{
-		RDB_LOG("Attempting to start");
+		RDB_LOG(mnt, "Attempting to start")
+
 		std::lock_guard lock(_mtx);
 		if (_status == Status::Running)
 		{
-			RDB_LOG("Attempting to stop");
+			RDB_LOG(mnt, "Attempting to stop");
 			for (decltype(auto) it : _threads)
 			{
 				it.stop = true;
@@ -36,25 +49,25 @@ namespace rdb
 			}
 			_threads.clear();
 			_status = Status::Stopped;
-			RDB_LOG("Attempting to restart");
+			RDB_LOG(mnt, "Attempting to restart");
 		}
 
-		std::filesystem::create_directory(_cfg.root);
-		if (!std::filesystem::exists(_cfg.root/"ntns"))
-			std::filesystem::create_directory(_cfg.root/"ntns");
+		std::filesystem::create_directory(_shared.cfg->root);
+		if (!std::filesystem::exists(_shared.cfg->root/"ntns"))
+			std::filesystem::create_directory(_shared.cfg->root/"ntns");
 
-		_threads.resize(_cfg.mnt.cores);
-		for (std::size_t i = 0; i < _cfg.mnt.cores; i++)
+		_threads.resize(_shared.cfg->mnt.cores);
+		for (std::size_t i = 0; i < _shared.cfg->mnt.cores; i++)
 		{	
 			_threads[i].thread = std::thread([this, i]() {
-				RDB_FMT("Starting core{}", i);
+				RDB_LOG(mnt, "Starting core", i);
 
-				const auto path = _cfg.root/std::format("vcpu{}", i);
+				const auto path = _shared.cfg->root/std::format("vcpu{}", i);
 				if (!std::filesystem::exists(path))
 				{
 					std::filesystem::create_directory(path);
 				}
-				else if (_cfg.mnt.numa)
+				else if (_shared.cfg->mnt.numa)
 				{
 					util::bind_thread(i);
 				}
@@ -74,7 +87,7 @@ namespace rdb
 					schemas.emplace(
 						std::piecewise_construct,
 						std::forward_as_tuple(schema),
-						std::forward_as_tuple(&_cfg, i, schema)
+						std::forward_as_tuple(_shared, i, schema)
 					);
 				}
 
@@ -90,7 +103,7 @@ namespace rdb
 				{
 					auto& t = _threads[i];
 					Thread::task task;
-					if (_cfg.mnt.cpu_profile == Config::Mount::CPUProfile::OptimizeUsage ?
+					if (_shared.cfg->mnt.cpu_profile == Config::Mount::CPUProfile::OptimizeUsage ?
 							t.queue.dequeue(task) :
 							t.queue.try_dequeue(task))
 					{
@@ -103,7 +116,7 @@ namespace rdb
 							f = schemas.emplace(
 								std::piecewise_construct,
 								std::forward_as_tuple(task.first),
-								std::forward_as_tuple(&_cfg, i, task.first)
+								std::forward_as_tuple(_shared, i, task.first)
 							).first;
 						}
 						task.second(&f->second);
@@ -118,7 +131,7 @@ namespace rdb
 						util::spinlock_yield();
 					else if (++yield_ctr < yield_iters)
 						std::this_thread::yield();
-					else if (_cfg.mnt.cpu_profile == Config::Mount::CPUProfile::OptimizeSpeed)
+					else if (_shared.cfg->mnt.cpu_profile == Config::Mount::CPUProfile::OptimizeSpeed)
 						std::this_thread::sleep_for(std::chrono::microseconds(50));
 				}
 			});
@@ -128,7 +141,7 @@ namespace rdb
 	}
 	void Mount::stop() noexcept
 	{
-		RDB_LOG("Attempting to stop");
+		RDB_LOG(mnt, "Attempting to stop");
 		{
 			std::lock_guard lock(_mtx);
 			for (decltype(auto) it : _threads)
@@ -160,15 +173,15 @@ namespace rdb
 		{
 			const auto [ it, _ ] = _log_shards.try_emplace(_shard_id);
 			f = it;
-			f->second.data.map(_cfg.root/"ntns"/"s0");
-			f->second.data.reserve(_cfg.logs.log_shard_size);
+			f->second.data.map(_shared.cfg->root/"ntns"/"s0");
+			f->second.data.reserve(_shared.cfg->logs.log_shard_size);
 		}
 		else if (f->second.offset + req_size > f->second.data.size())
 		{
 			const auto [ it, _ ] = _log_shards.try_emplace(++_shard_id);
 			f = it;
-			it->second.data.map(_cfg.root/"ntns"/std::format("s{}", _shard_id));
-			it->second.data.reserve(_cfg.logs.log_shard_size);
+			it->second.data.map(_shared.cfg->root/"ntns"/std::format("s{}", _shard_id));
+			it->second.data.reserve(_shared.cfg->logs.log_shard_size);
 		}
 		auto& shard = f->second;
 		const auto off = shard.offset;
@@ -216,7 +229,7 @@ namespace rdb
 	void Mount::_replay_queries() noexcept
 	{
 		std::vector<std::size_t> shards;
-		for (decltype(auto) it : std::filesystem::directory_iterator(_cfg.root/"ntns"))
+		for (decltype(auto) it : std::filesystem::directory_iterator(_shared.cfg->root/"ntns"))
 		{
 			shards.push_back(
 				std::stoi(it
@@ -259,7 +272,7 @@ namespace rdb
 
 	std::size_t Mount::_vcpu(key_type key) const noexcept
 	{
-		return key % _cfg.mnt.cores;
+		return key % _shared.cfg->mnt.cores;
 	}
 
 	bool Mount::query_sync(std::span<const unsigned char> packet, QueryEngine::ReadChainStore::ptr store) noexcept
@@ -302,7 +315,7 @@ namespace rdb
 		const auto* inf = RuntimeSchemaReflection::fetch(schema);
 		if (inf == nullptr)
 		{
-			RDB_WARN("Unrecognized schema passed to query parser")
+			RDB_WARN(mnt, "Unrecognized schema passed to query parser")
 			return { packet.size(), 0, nullptr };
 		}
 		return { off, schema, inf };

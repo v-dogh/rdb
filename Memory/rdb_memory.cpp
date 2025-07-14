@@ -12,7 +12,7 @@ namespace rdb
 	{
 		while (copy._flush_running.load() != 0)
 			copy._flush_running.wait(copy._flush_running.load());
-		_logs = std::move(copy._logs);
+		_disk_logs = std::move(copy._disk_logs);
 		_path = std::move(copy._path);
 		_map = std::move(copy._map);
 		_locks = std::move(copy._locks);
@@ -23,7 +23,7 @@ namespace rdb
 		_mappings = copy._mappings;
 		_descriptors = copy._descriptors;
 		_flush_id = copy._flush_id.load();
-		_cfg = copy._cfg;
+		_shared = copy._shared;
 		_id = copy._id;
 		_pressure = copy._pressure;
 		_schema = copy._schema;
@@ -34,36 +34,36 @@ namespace rdb
 		_pressure += bytes;
 	}
 
-	MemoryCache::MemoryCache(Config* cfg, std::size_t core, schema_type schema) :
-		_cfg(cfg),
+	MemoryCache::MemoryCache(Shared shared, std::size_t core, schema_type schema) :
+		_shared(shared),
 		_map(std::make_shared<write_store>()),
 		_path(
-			cfg->root/
+			shared.cfg->root/
 			std::format("vcpu{}", core)/
 			std::format("[{}]", uuid::encode(schema, uuid::table_alnum))
 		),
 		_id(core),
-		_logs(_cfg, _path/"logs", schema),
+		_disk_logs(shared, _path/"logs", schema),
 		_schema(schema)
 	{
 		_handle_cache.reserve(164);
 		_handle_cache_tracker.reserve(164);
 		if (!std::filesystem::exists(_path))
 		{
-			RDB_FMT("VCPU{} MC GENERATE", _id)
+			RDB_LOG(mem, "vcpu", _id, "Generating memory cache")
 			std::filesystem::create_directories(_path);
 			std::filesystem::create_directory(_path/"flush");
 			std::filesystem::create_directory(_path/"logs");
 		}
 		else
 		{
-			RDB_FMT("VCPU{} MC REPLAY", _id)
+			RDB_LOG(mem, "vcpu", _id, "Replaying memory cache")
 			std::vector<std::filesystem::path> corrupted;
 			for (decltype(auto) it : std::filesystem::directory_iterator(_path/"flush"))
 			{
 				if (std::filesystem::exists(it.path()/"lock"))
 				{
-					RDB_FMT("VCPU{} MCR DETECTED CORRUPTED FLUSH{}", _id,
+					RDB_LOG(mem, "vcpu", _id, "MCR DETECTED CORRUPTED FLUSH{}", _id,
 						std::stoul(it.path().filename().string().substr(1)))
 					corrupted.push_back(it.path());
 				}
@@ -87,27 +87,27 @@ namespace rdb
 				std::filesystem::remove_all(it);
 			}
 
-			_logs.replay([this](WriteType type, key_type key, View sort, View data) {
+			_disk_logs.replay([this](WriteType type, key_type key, View sort, View data) {
 				if (type == WriteType::CreatePartition)
 				{
-					RDB_FMT("VCPU{} MCR CREATE PARTITION <{}>", _id, uuid::encode(key, uuid::table_alnum))
+					RDB_TRACE(mem, "vcpu", _id, "Replay - create partition <{}>", _id, uuid::encode(key, uuid::table_alnum))
 					_create_partition_if(*_map, key, data);
 				}
 				else if (type == WriteType::Reset)
 				{
-					RDB_FMT("VCPU{} MCR RESET <{}>", _id, uuid::encode(key, uuid::table_alnum))
+					RDB_TRACE(mem, "vcpu", _id, "Replay - reset <{}>", _id, uuid::encode(key, uuid::table_alnum))
 					_reset_impl(_find_partition(*_map, key), sort);
 					_flush_if();
 				}
 				else if (type == WriteType::Remov)
 				{
-					RDB_FMT("VCPU{} MCR REMOVE <{}>", _id, uuid::encode(key, uuid::table_alnum))
+					RDB_TRACE(mem, "vcpu", _id, "Replay - remove <{}>", _id, uuid::encode(key, uuid::table_alnum))
 					_remove_impl(_find_partition(*_map, key), sort);
 					_flush_if();
 				}
 				else
 				{
-					RDB_FMT("VCPU{} MCR WRITE <{}>", _id, uuid::encode(key, uuid::table_alnum))
+					RDB_TRACE(mem, "vcpu", _id, "Replay - write <{}>", _id, uuid::encode(key, uuid::table_alnum))
 					_write_impl(_find_partition(*_map, key), type, sort, data);
 					_flush_if();
 				}
@@ -159,10 +159,10 @@ namespace rdb
 			handle.idx--;
 		}
 
-		if (_descriptors + descriptor_cost >= _cfg->cache.max_descriptors ||
-			_mappings + map_cost >= _cfg->cache.max_mappings)
+		if (_descriptors + descriptor_cost >= _shared.cfg->cache.max_descriptors ||
+			_mappings + map_cost >= _shared.cfg->cache.max_mappings)
 		{
-			RDB_WARN("File resource limit")
+			RDB_WARN("vcpu", _id, "File resource limit")
 
 			for (std::size_t i = 0; i < _handle_cache_tracker.size(); i++)
 			{
@@ -373,7 +373,7 @@ namespace rdb
 
 	bool MemoryCache::_read_impl(key_type key, const View& sort, field_bitmap fields, const read_callback& callback) noexcept
 	{
-		RDB_FMT("VCPU{} MC READ <{}>", _id, uuid::encode(key, uuid::table_alnum))
+		RDB_LOG(mem, "vcpu", _id, "MC READ <{}>", _id, uuid::encode(key, uuid::table_alnum))
 
 		// 1. Search cache
 		// 2. If not found -> search disk (from newest to oldest)
@@ -398,7 +398,7 @@ namespace rdb
 			}
 			else if (flush_running)
 			{
-				RDB_TRACE("VCPU{} MC READ SCANNING RMPS", _id)
+				RDB_TRACE(mem, "vcpu", _id, "MC READ SCANNING RMPS")
 				for (auto it = _readonly_maps.rbegin(); it != _readonly_maps.rend(); ++it)
 				{
 					if (const auto lock = it->lock(); lock != nullptr)
@@ -417,10 +417,10 @@ namespace rdb
 		}
 		// Search disk
 		{
-			RDB_TRACE("VCPU{} MC READ CACHE MISS", _id)
+			RDB_TRACE(mem, "vcpu", _id, "MC READ CACHE MISS")
 			for (std::size_t j = _flush_id - flush_running; j > 0; j--)
 			{
-				RDB_TRACE("VCPU{} MC READ SEARCHING FLUSH{}", _id, j - 1)
+				RDB_TRACE(mem, "vcpu", _id, "MC READ SEARCHING FLUSH{}", _id, j - 1)
 
 				const auto i = j - 1;
 
@@ -441,7 +441,7 @@ namespace rdb
 					// Wide partition
 					if (info.skeys())
 					{
-						RDB_TRACE("VCPU{} MC READ SEARCHING IN PARTITION", _id)
+						RDB_TRACE(mem, "vcpu", _id, "MC READ SEARCHING IN PARTITION")
 
 						const auto partition_size = byte::sread<std::uint64_t>(data.memory(), off);
 
@@ -452,7 +452,7 @@ namespace rdb
 
 						if (!_bloom_may_contain(uuid::xxhash(sort), sort_bloom_offset, handle))
 						{
-							RDB_TRACE("VCPU{} MC READ INTRA-PARTITION BLOOM DISCARD", _id)
+							RDB_TRACE(mem, "vcpu", _id, "MC READ INTRA-PARTITION BLOOM DISCARD")
 							continue;
 						}
 
@@ -474,7 +474,7 @@ namespace rdb
 
 							off = sparse_block_offset.value();
 
-							RDB_TRACE("VCPU{} MC READ SEARCHING IN BLOCK SEQUENCE", _id)
+							RDB_TRACE(mem, "vcpu", _id, "MC READ SEARCHING IN BLOCK SEQUENCE")
 							while (off < offset + partition_size)
 							{
 								const auto prefix = info.static_prefix();
@@ -521,7 +521,7 @@ namespace rdb
 								{
 									const auto ascending = (result_min <= 0 && result_max >= 0);
 
-									RDB_TRACE("VCPU{} MC READ FOUND MATCHING BLOCK", _id)
+									RDB_TRACE(mem, "vcpu", _id, "MC READ FOUND MATCHING BLOCK")
 
 									const auto sparse_offset = dynamic ?
 										byte::search_partition_binary_indirect<std::uint32_t, std::uint32_t, std::uint16_t>(
@@ -548,7 +548,7 @@ namespace rdb
 											block = data.memory().subspan(off, decompressed);
 										}
 
-										RDB_TRACE("VCPU{} MC READ LINEAR BLOCK SEARCH", _id)
+										RDB_TRACE(mem, "vcpu", _id, "MC READ LINEAR BLOCK SEARCH")
 
 										off = sparse_offset.value() + info.partition_size(block.data());
 										do
@@ -565,7 +565,7 @@ namespace rdb
 											}
 											else if (type == DataType::Tombstone)
 											{
-												RDB_TRACE("VCPU{} MC READ VALUE REMOVED", _id)
+												RDB_TRACE(mem, "vcpu", _id, "MC READ VALUE REMOVED")
 												return false;
 											}
 											else
@@ -577,14 +577,14 @@ namespace rdb
 
 											if (eq)
 											{
-												RDB_TRACE("VCPU{} MC READ FOUND VALUE", _id)
+												RDB_TRACE(mem, "vcpu", _id, "MC READ FOUND VALUE")
 												if ((found += _read_entry_impl(instance, type, fields, callback)) == required)
 												{
 													return true;
 												}
 												else
 												{
-													RDB_TRACE("VCPU{} MC CONTINUE SEARCH", _id)
+													RDB_TRACE(mem, "vcpu", _id, "MC CONTINUE SEARCH")
 													break;
 												}
 											}
@@ -598,7 +598,7 @@ namespace rdb
 									}
 									else
 									{
-										RDB_TRACE("VCPU{} MC READ BLOOM MISS", _id)
+										RDB_TRACE(mem, "vcpu", _id, "MC READ BLOOM MISS")
 									}
 								}
 								else
@@ -607,7 +607,7 @@ namespace rdb
 						}
 						else
 						{
-							RDB_TRACE("VCPU{} MC READ BLOOM SORT MISS", _id)
+							RDB_TRACE(mem, "vcpu", _id, "MC READ BLOOM SORT MISS")
 						}
 					}
 					// Unary partition
@@ -624,7 +624,7 @@ namespace rdb
 
 						// Search in block
 
-						RDB_TRACE("VCPU{} MC READ SEARCHING IN BLOCK", _id)
+						RDB_TRACE(mem, "vcpu", _id, "MC READ SEARCHING IN BLOCK")
 
 						const auto sparse_offset = byte::search_partition<key_type, std::uint64_t>(
 							key, data.memory().subspan(off), index_count, true
@@ -656,14 +656,14 @@ namespace rdb
 								block = data.memory().subspan(off, decompressed);
 							}
 
-							RDB_TRACE("VCPU{} MC READ LINEAR BLOCK SEARCH", _id)
+							RDB_TRACE(mem, "vcpu", _id, "MC READ LINEAR BLOCK SEARCH")
 
 							off = sparse_offset.value();
 							do
 							{
 								if (byte::sread<key_type>(block, off) == key)
 								{
-									RDB_TRACE("VCPU{} MC READ FOUND VALUE", _id)
+									RDB_TRACE(mem, "vcpu", _id, "MC READ FOUND VALUE")
 
 									const auto type = DataType(block[off++]);
 									const auto instance = View::view(block.subspan(off));
@@ -676,7 +676,7 @@ namespace rdb
 									}
 									else
 									{
-										RDB_TRACE("VCPU{} MC CONTINUE SEARCH", _id)
+										RDB_TRACE(mem, "vcpu", _id, "MC CONTINUE SEARCH")
 										break;
 									}
 								}
@@ -691,7 +691,7 @@ namespace rdb
 						}
 						else
 						{
-							RDB_TRACE("VCPU{} MC READ BLOOM MISS", _id)
+							RDB_TRACE(mem, "vcpu", _id, "MC READ BLOOM MISS")
 						}
 					}
 				}
@@ -840,7 +840,7 @@ namespace rdb
 		// 					}
 		// 					else if (type == DataType::Tombstone)
 		// 					{
-		// 						RDB_TRACE("VCPU{} MC READ VALUE REMOVED", _id)
+		// 						RDB_TRACE(mem, "vcpu", _id, "MC READ VALUE REMOVED")
 		// 						return false;
 		// 					}
 		// 					else
@@ -852,14 +852,14 @@ namespace rdb
 
 		// 					if (eq)
 		// 					{
-		// 						RDB_TRACE("VCPU{} MC READ FOUND VALUE", _id)
+		// 						RDB_TRACE(mem, "vcpu", _id, "MC READ FOUND VALUE")
 		// 						if ((found += _read_entry_impl(instance, type, fields, callback)) == required)
 		// 						{
 		// 							return true;
 		// 						}
 		// 						else
 		// 						{
-		// 							RDB_TRACE("VCPU{} MC CONTINUE SEARCH", _id)
+		// 							RDB_TRACE(mem, "vcpu", _id, "MC CONTINUE SEARCH")
 		// 							break;
 		// 						}
 		// 					}
@@ -893,17 +893,17 @@ namespace rdb
 		thread_local std::unique_ptr<View[]> frag_pool_data{ new View[4] };
 		thread_local std::span<View> frag_pool{ frag_pool_data.get(), 4 };
 
-		RDB_FMT("VCPU{} MC PAGE {}c <{}>", _id, count, uuid::encode(key, uuid::table_alnum))
+		RDB_LOG(mem, "vcpu", _id, "MC PAGE {}c <{}>", _id, count, uuid::encode(key, uuid::table_alnum))
 
 		auto& info = _info();
 		if (!info.skeys())
 		{
-			RDB_WARN("VCPU{} MC PAGE NULL READ <{}>", _id, count, uuid::encode(key, uuid::table_alnum))
+			RDB_WARN("vcpu", _id, "VCPU{} MC PAGE NULL READ <{}>", _id, count, uuid::encode(key, uuid::table_alnum))
 			return nullptr;
 		}
 		else if (count == 0)
 		{
-			RDB_WARN("VCPU{} MC PAGE ZERO READ <{}>", _id, count, uuid::encode(key, uuid::table_alnum))
+			RDB_WARN("vcpu", _id, "VCPU{} MC PAGE ZERO READ <{}>", _id, count, uuid::encode(key, uuid::table_alnum))
 			return nullptr;
 		}
 		else
@@ -951,7 +951,7 @@ namespace rdb
 			{
 				if (_flush_running)
 				{
-					RDB_TRACE("VCPU{} MC PAGE SCANNING RMPS", _id)
+					RDB_TRACE(mem, "vcpu", _id, "MC PAGE SCANNING RMPS")
 					for (auto it = _readonly_maps.rbegin(); it != _readonly_maps.rend(); ++it)
 					{
 						if (const auto lock = it->lock(); lock != nullptr)
@@ -978,7 +978,7 @@ namespace rdb
 				const auto flush_running = _flush_running.load();
 				for (std::size_t j = _flush_id - flush_running; j > 0; j--)
 				{
-					RDB_TRACE("VCPU{} MC PAGE SEARCHING FLUSH{}", _id, j - 1)
+					RDB_TRACE(mem, "vcpu", _id, "MC PAGE SEARCHING FLUSH{}", _id, j - 1)
 
 					const auto i = j - 1;
 
@@ -996,7 +996,7 @@ namespace rdb
 					}
 				}
 			}
-			RDB_FMT("VCPU{} MC PAGE SIZE {}b <{}>", _id, result.size(), uuid::encode(key, uuid::table_alnum))
+			RDB_LOG(mem, "vcpu", _id, "MC PAGE SIZE {}b <{}>", _id, result.size(), uuid::encode(key, uuid::table_alnum))
 			return result;
 		}
 	}
@@ -1021,8 +1021,8 @@ namespace rdb
 		);
 		if (created)
 		{
-			RDB_FMT("VCPU{} MC CREATE PARTITION <{}>", _id, uuid::encode(key, uuid::table_alnum))
-			_logs.log(WriteType::CreatePartition, key, nullptr, pkey);
+			RDB_LOG(mem, "vcpu", _id, "MC CREATE PARTITION <{}>", _id, uuid::encode(key, uuid::table_alnum))
+			_disk_logs.log(WriteType::CreatePartition, key, nullptr, pkey);
 		}
 		return it;
 	}
@@ -1414,41 +1414,41 @@ namespace rdb
 
 	void MemoryCache::write(WriteType type, key_type key, const View& partition, const View& sort, std::span<const unsigned char> data, Origin origin) noexcept
 	{
-		RDB_FMT("VCPU{} MC WRITE <{}> {}b", _id, uuid::encode(key, uuid::table_alnum), data.size())
+		RDB_LOG(mem, "vcpu", _id, "MC WRITE <{}> {}b", _id, uuid::encode(key, uuid::table_alnum), data.size())
 		[[ unlikely ]] if (is_locked(key, sort, origin))
 		{
-			RDB_FMT("VCPU{} MC LOCKED <{}>", _id, uuid::encode(key, uuid::table_alnum))
+			RDB_LOG(mem, "vcpu", _id, "MC LOCKED <{}>", _id, uuid::encode(key, uuid::table_alnum))
 			return;
 		}
 		auto& schema
 			= _info();
 		const auto part = _create_partition_log_if(*_map, key, partition);
-		_logs.log(type, key, sort, View::view(data));
+		_disk_logs.log(type, key, sort, View::view(data));
 		_write_impl(part, type, sort, data);
 		_flush_if();
 	}
 	void MemoryCache::reset(key_type key, const View& partition, const View& sort, Origin origin) noexcept
 	{
-		RDB_FMT("VCPU{} MC RESET <{}>", _id, uuid::encode(key, uuid::table_alnum))
+		RDB_LOG(mem, "vcpu", _id, "MC RESET <{}>", _id, uuid::encode(key, uuid::table_alnum))
 		[[ unlikely ]] if (is_locked(key, sort, origin))
 		{
-			RDB_FMT("VCPU{} MC LOCKED <{}>", _id, uuid::encode(key, uuid::table_alnum))
+			RDB_LOG(mem, "vcpu", _id, "MC LOCKED <{}>", _id, uuid::encode(key, uuid::table_alnum))
 			return;
 		}
 		const auto part = _create_partition_log_if(*_map, key, partition);
-		_logs.log(WriteType::Reset, key, sort);
+		_disk_logs.log(WriteType::Reset, key, sort);
 		_reset_impl(part, sort);
 		_flush_if();
 	}
 	void MemoryCache::remove(key_type key, const View& sort, Origin origin) noexcept
 	{
-		RDB_FMT("VCPU{} MC REMOVE <{}>", _id, uuid::encode(key, uuid::table_alnum))
+		RDB_LOG(mem, "vcpu", _id, "MC REMOVE <{}>", _id, uuid::encode(key, uuid::table_alnum))
 		[[ unlikely ]] if (is_locked(key, sort, origin))
 		{
-			RDB_FMT("VCPU{} MC LOCKED <{}>", _id, uuid::encode(key, uuid::table_alnum))
+			RDB_LOG(mem, "vcpu", _id, "MC LOCKED <{}>", _id, uuid::encode(key, uuid::table_alnum))
 			return;
 		}
-		_logs.log(WriteType::Remov, key, sort);
+		_disk_logs.log(WriteType::Remov, key, sort);
 		_remove_impl(
 			_create_partition_log_if(*_map, key, sort),
 			sort
@@ -1497,7 +1497,7 @@ namespace rdb
 			const auto res = !lock->expired();
 			lock->unlock();
 			_lock_cnt--;
-			RDB_WARN_IF(lock->expired(), "VCPU{} MC LOCK EXPIRED BEFORE UNLOCK <{}>", _id, uuid::encode(key, uuid::table_compact))
+			RDB_WARN_IF(lock->expired(), mem, "vcpu", _id, "MC LOCK EXPIRED BEFORE UNLOCK <", uuid::encode(key, uuid::table_compact), ">")
 			return res;
 		}
 		return false;
@@ -1520,7 +1520,7 @@ namespace rdb
 				const auto lcnt = _lock_cnt;
 				[[ unlikely ]] if (f->expired_auto())
 					_lock_cnt--;
-				if (lcnt > _cfg->cache.max_locks)
+				if (lcnt > _shared.cfg->cache.max_locks)
 				{
 					if (data.size() == 1)
 						_locks.erase(key);
@@ -1539,7 +1539,7 @@ namespace rdb
 				const auto lcnt = _lock_cnt;
 				[[ unlikely ]] if (ptr.expired_auto())
 					_lock_cnt--;
-				if (lcnt > _cfg->cache.max_locks)
+				if (lcnt > _shared.cfg->cache.max_locks)
 					_locks.erase(key);
 				return false;
 			}
@@ -1616,14 +1616,14 @@ namespace rdb
 	{
 		// [ uint8(flag,type) | [ uint32(key-count) | uint16[probability as 1/100 of percentage] | ... ] ... ]
 
-		if (_cfg->cache.partition_bloom_fp_rate == 1.f)
+		if (_shared.cfg->cache.partition_bloom_fp_rate == 1.f)
 			return;
 
-		const auto prob = _cfg->cache.partition_bloom_fp_rate;
+		const auto prob = _shared.cfg->cache.partition_bloom_fp_rate;
 		const auto prob_conv = static_cast<std::uint16_t>(prob * 10'000);
 		const auto bits = _bloom_bits(map.size(), prob);
 
-		RDB_FMT("VCPU{} MC FLUSH{} BEGIN BLOOM WRITE {}bits", _id, id, bits)
+		RDB_LOG(mem, "vcpu", _id, "MC FLUSH{} BEGIN BLOOM WRITE {}bits", _id, id, bits)
 
 		bloom.vmap();
 		bloom.hint(Mapper::Access::Random);
@@ -1637,20 +1637,20 @@ namespace rdb
 			_bloom_round_impl(key.first, buffer, map.size(), bits);
 		bloom.vmap_increment((bits + 7) / 8);
 
-		RDB_FMT("VCPU{} MC FLUSH{} END BLOOM WRITE {}b", _id, id, bloom.size())
+		RDB_LOG(mem, "vcpu", _id, "MC FLUSH{} END BLOOM WRITE {}b", _id, id, bloom.size())
 	}
 
 	std::size_t MemoryCache::_bloom_intra_partition_begin_impl(write_store::const_iterator part, Mapper& bloom, int id) noexcept
 	{
-		if (_cfg->cache.intra_partition_bloom_fp_rate == 1.f)
+		if (_shared.cfg->cache.intra_partition_bloom_fp_rate == 1.f)
 			return 0;
 
 		const auto size = std::get<partition>(part->second.second).size();
-		const auto prob = _cfg->cache.intra_partition_bloom_fp_rate;
+		const auto prob = _shared.cfg->cache.intra_partition_bloom_fp_rate;
 		const auto prob_conv = static_cast<std::uint16_t>(prob * 10'000);
 		const auto bits = _bloom_bits(size, prob);
 
-		RDB_FMT("VCPU{} MC FLUSH{} BEGIN PARTITION BLOOM WRITE {}bits", _id, id, bits)
+		RDB_LOG(mem, "vcpu", _id, "MC FLUSH{} BEGIN PARTITION BLOOM WRITE {}bits", _id, id, bits)
 
 		bloom.vmap_increment(byte::swrite<std::uint16_t>(bloom.append(), prob_conv));
 		bloom.vmap_increment(byte::swrite<std::uint32_t>(bloom.append(), size));
@@ -1670,14 +1670,14 @@ namespace rdb
 	}
 	void MemoryCache::_bloom_intra_partition_end_impl(write_store::const_iterator partition, std::size_t bits, Mapper& bloom, int id) noexcept
 	{
-		if (_cfg->cache.intra_partition_bloom_fp_rate == 1.f)
+		if (_shared.cfg->cache.intra_partition_bloom_fp_rate == 1.f)
 			return;
 		bloom.vmap_increment((bits + 7) / 8);
-		RDB_FMT("VCPU{} MC FLUSH{} END BLOOM WRITE {}b", _id, id, bloom.size())
+		RDB_LOG(mem, "vcpu", _id, "MC FLUSH{} END BLOOM WRITE {}b", _id, id, bloom.size())
 	}
 	void MemoryCache::_data_impl(const write_store& map, Mapper& data, Mapper& indexer, Mapper& bloom, int id) noexcept
 	{
-		const auto amortized_block_size = static_cast<std::size_t>(_cfg->cache.block_size * 1.2);
+		const auto amortized_block_size = static_cast<std::size_t>(_shared.cfg->cache.block_size * 1.2);
 
 		thread_local std::unique_ptr<BlockSourceMultiplexer::Node[]> frag_pool_data{ new BlockSourceMultiplexer::Node[1024] };
 		thread_local std::unique_ptr<unsigned char[]> block_pool_data{ new unsigned char[amortized_block_size] };
@@ -1706,8 +1706,8 @@ namespace rdb
 		// implement prefixes for dynamic sort key types
 		// implement per-partition sort-key block index (could just push it at the beginning)
 
-		RDB_FMT("VCPU{} MC FLUSH{} BEGIN DATA WRITE", _id, id)
-		RDB_FMT("VCPU{} MC FLUSH{} BEGIN INDEXER WRITE {}", _id, id, map.size())
+		RDB_LOG(mem, "vcpu", _id, "MC FLUSH{} BEGIN DATA WRITE", _id, id)
+		RDB_LOG(mem, "vcpu", _id, "MC FLUSH{} BEGIN INDEXER WRITE {}", _id, id, map.size())
 
 		auto& info =
 			_info();
@@ -1723,7 +1723,7 @@ namespace rdb
 		// Sort keys
 		std::vector<key_type> offsets{};
 		{
-			RDB_TRACE("VCPU{} MC FLUSH{} SORTING KEYS", _id, id)
+			RDB_TRACE(mem, "vcpu", _id, "MC FLUSH{} SORTING KEYS", _id, id)
 			offsets.resize(map.size());
 			std::transform(map.begin(), map.end(), offsets.begin(), [](const auto& it) { return it.first; });
 			std::sort(offsets.begin(), offsets.end());
@@ -1731,13 +1731,13 @@ namespace rdb
 		// Metadata
 		std::size_t idxoff = 0;
 		{
-			RDB_TRACE("VCPU{} MC FLUSH{} WRITING METADATA", _id, id)
+			RDB_TRACE(mem, "vcpu", _id, "MC FLUSH{} WRITING METADATA", _id, id)
 			idxoff += byte::swrite<key_type>(indexer.memory(), idxoff, offsets.back());
 			idxoff += byte::swrite<std::uint32_t>(indexer.memory(), idxoff, map.size());
 			data.vmap_increment(byte::swrite<std::uint64_t>(data.append(), version));
-			data.vmap_increment(byte::swrite<std::uint64_t>(data.append(), _cfg->cache.block_sparse_index_ratio));
-			data.vmap_increment(byte::swrite<std::uint64_t>(data.append(), _cfg->cache.partition_sparse_index_ratio));
-			data.vmap_increment(byte::swrite<std::uint64_t>(data.append(), _cfg->cache.block_size));
+			data.vmap_increment(byte::swrite<std::uint64_t>(data.append(), _shared.cfg->cache.block_sparse_index_ratio));
+			data.vmap_increment(byte::swrite<std::uint64_t>(data.append(), _shared.cfg->cache.partition_sparse_index_ratio));
+			data.vmap_increment(byte::swrite<std::uint64_t>(data.append(), _shared.cfg->cache.block_size));
 		}
 		// Stream blocks
 		{
@@ -1770,7 +1770,7 @@ namespace rdb
 			std::vector<std::pair<std::uint32_t, std::uint32_t>> sort_dynamic_indices{};
 
 			if (!keys)
-				indices.reserve((offsets.size() / _cfg->cache.partition_sparse_index_ratio) / 2);
+				indices.reserve((offsets.size() / _shared.cfg->cache.partition_sparse_index_ratio) / 2);
 
 			BlockSourceMultiplexer source(block_pool, frag_pool);
 
@@ -1787,7 +1787,7 @@ namespace rdb
 				if (source.empty())
 					return;
 
-				RDB_TRACE("VCPU{} MC FLUSH{} EMITTING BLOCK", _id, id)
+				RDB_TRACE(mem, "vcpu", _id, "MC FLUSH{} EMITTING BLOCK", _id, id)
 				RDB_WARN_IF(
 					source.fragments() >= frag_pool.size(),
 					"VCPU{} MC FLUSH{} HIGH FRAGMENTATION: {}", _id, id, source.fragments()
@@ -1798,7 +1798,7 @@ namespace rdb
 				source.flush();
 				// Index
 				{
-					RDB_TRACE("VCPU{} MC FLUSH{} WRITING INDEX", _id, id)
+					RDB_TRACE(mem, "vcpu", _id, "MC FLUSH{} WRITING INDEX", _id, id)
 					data.vmap_increment(byte::swrite<std::uint64_t>(data.append(), source.digest()));
 					if (keys)
 					{
@@ -1844,24 +1844,24 @@ namespace rdb
 					}
 				}
 				// Compress and write (+write block index)
-				RDB_FMT("VCPU{} MC FLUSH{} WRITE BLOCK{} {}b", _id, id, blocks++, source.size())
+				RDB_LOG(mem, "vcpu", _id, "MC FLUSH{} WRITE BLOCK{} {}b", _id, id, blocks++, source.size())
 				{
 					const auto psize = source.size();
 					StaticBufferSink sink(psize, compressed_block_pool);
 					snappy::Compress(&source, &sink);
 					const auto compsize = sink.size();
-					RDB_FMT("VCPU{} MC FLUSH{} WRITE BLOCK{} COMPRESSION RATIO {}%", _id, id, blocks - 1, (std::round((float(compsize) / psize) * 100) / 100) * 100)
+					RDB_LOG(mem, "vcpu", _id, "MC FLUSH{} WRITE BLOCK{} COMPRESSION RATIO {}%", _id, id, blocks - 1, (std::round((float(compsize) / psize) * 100) / 100) * 100)
 
-					if (compsize / psize < _cfg->cache.compression_ratio)
+					if (compsize / psize < _shared.cfg->cache.compression_ratio)
 					{
-						RDB_FMT("VCPU{} MC FLUSH{} WRITE BLOCK{} COMPRESSED", _id, id, blocks - 1)
+						RDB_LOG(mem, "vcpu", _id, "MC FLUSH{} WRITE BLOCK{} COMPRESSED", _id, id, blocks - 1)
 						data.vmap_increment(byte::swrite<std::uint32_t>(data.append(), psize));
 						data.vmap_increment(byte::swrite<std::uint32_t>(data.append(), sink.size()));
 						data.vmap_increment(byte::swrite(data.append(), sink.data()));
 					}
 					else
 					{
-						RDB_FMT("VCPU{} MC FLUSH{} WRITE BLOCK{} RAW", _id, id, blocks - 1)
+						RDB_LOG(mem, "vcpu", _id, "MC FLUSH{} WRITE BLOCK{} RAW", _id, id, blocks - 1)
 						data.vmap_increment(byte::swrite<std::uint32_t>(data.append(), psize));
 						data.vmap_increment(byte::swrite<std::uint32_t>(data.append(), psize));
 						data.vmap_increment(byte::swrite(data.append(), source.block()));
@@ -1886,7 +1886,7 @@ namespace rdb
 								}
 								sort_block_dynamic_indices.clear();
 							}
-							else if (blocks % _cfg->cache.block_sparse_index_ratio == 0)
+							else if (blocks % _shared.cfg->cache.block_sparse_index_ratio == 0)
 							{
 								sort_block_dynamic_indices.push_back({
 									zero_keyspace_offset,
@@ -1909,7 +1909,7 @@ namespace rdb
 								}
 								sort_block_indices.clear();
 							}
-							else if (blocks % _cfg->cache.block_sparse_index_ratio == 0)
+							else if (blocks % _shared.cfg->cache.block_sparse_index_ratio == 0)
 							{
 								sort_block_indices.push_back({
 									saved_zero_index,
@@ -1937,13 +1937,13 @@ namespace rdb
 
 					if (dynamic)
 					{
-						sort_block_dynamic_indices.reserve(part.size() / _cfg->cache.partition_sparse_index_ratio);
-						sort_dynamic_indices.reserve(sort_block_indices.capacity() / _cfg->cache.block_sparse_index_ratio);
+						sort_block_dynamic_indices.reserve(part.size() / _shared.cfg->cache.partition_sparse_index_ratio);
+						sort_dynamic_indices.reserve(sort_block_indices.capacity() / _shared.cfg->cache.block_sparse_index_ratio);
 					}
 					else
 					{
-						sort_block_indices.reserve(part.size() / _cfg->cache.partition_sparse_index_ratio);
-						sort_indices.reserve(sort_block_indices.capacity() / _cfg->cache.block_sparse_index_ratio);
+						sort_block_indices.reserve(part.size() / _shared.cfg->cache.partition_sparse_index_ratio);
+						sort_indices.reserve(sort_block_indices.capacity() / _shared.cfg->cache.block_sparse_index_ratio);
 					}
 
 					// Reserve partition data and setup partition
@@ -1967,7 +1967,7 @@ namespace rdb
 						// Write data
 
 						const auto buffer = data->flush_buffer();
-						if (j % _cfg->cache.partition_sparse_index_ratio == 0)
+						if (j % _shared.cfg->cache.partition_sparse_index_ratio == 0)
 						{
 							if (dynamic)
 							{
@@ -1990,9 +1990,9 @@ namespace rdb
 						if (data->vtype == DataType::SchemaInstance) source.push({ .data = buffer });
 						else source.push({ .key = key, .data = buffer });
 
-						if (source.size() >= _cfg->cache.block_size)
+						if (source.size() >= _shared.cfg->cache.block_size)
 						{
-							RDB_TRACE("VCPU{} MC FLUSH{} BLOCK{} PRESSURE REACHED {}", _id, id, blocks, source.size())
+							RDB_TRACE(mem, "vcpu", _id, "MC FLUSH{} BLOCK{} PRESSURE REACHED {}", _id, id, blocks, source.size())
 							write_block();
 						}
 						return true;
@@ -2012,14 +2012,14 @@ namespace rdb
 				else
 				{
 					// Construct block
-					for (; i < offsets.size() && source.size() <= _cfg->cache.block_size; i++)
+					for (; i < offsets.size() && source.size() <= _shared.cfg->cache.block_size; i++)
 					{
 						const auto& [ pkey, pdata ] = map.at(offsets[i]);
 						const auto buffer = std::get<single_slot>(pdata)->flush_buffer();
 						source.push({ .data = pkey });
 						if (!buffer.empty())
 						{
-							if (i % _cfg->cache.partition_sparse_index_ratio == 0)
+							if (i % _shared.cfg->cache.partition_sparse_index_ratio == 0)
 							{
 								indices.push_back({
 									offsets[i],
@@ -2041,8 +2041,8 @@ namespace rdb
 			}
 		}
 
-		RDB_FMT("VCPU{} MC FLUSH{} END INDEXER WRITE {}b", _id, id, indexer.size())
-		RDB_FMT("VCPU{} MC FLUSH{} END DATA WRITE {}b", _id, id, data.size())
+		RDB_LOG(mem, "vcpu", _id, "MC FLUSH{} END INDEXER WRITE {}b", _id, id, indexer.size())
+		RDB_LOG(mem, "vcpu", _id, "MC FLUSH{} END DATA WRITE {}b", _id, id, data.size())
 	}
 
 	void MemoryCache::_data_close_impl(Mapper& data) noexcept
@@ -2085,7 +2085,7 @@ namespace rdb
 	}
 	void MemoryCache::_flush_if() noexcept
 	{
-		[[ unlikely ]] if (_pressure > _cfg->cache.flush_pressure)
+		[[ unlikely ]] if (_pressure > _shared.cfg->cache.flush_pressure)
 		{
 			[[ unlikely ]] if (!_flush_thread.joinable())
 			{
@@ -2097,8 +2097,8 @@ namespace rdb
 						if (_flush_tasks.dequeue(flush_data) && flush_data.first != nullptr)
 						{
 							_flush_impl(*map, id);
-							_logs.mark(id);
-							RDB_FMT("VCPU{} MC FLUSH{} END", _id, id)
+							_disk_logs.mark(id);
+							RDB_LOG(mem, "vcpu", _id, "MC FLUSH{} END", _id, id)
 							_handle_cache[id].unlocked.store(true, std::memory_order::release);
 							--_flush_running;
 							_flush_running.notify_all();
@@ -2117,9 +2117,9 @@ namespace rdb
 
 		++_flush_running;
 		_readonly_maps.push_back(_map);
-		_logs.snapshot(_flush_id);
+		_disk_logs.snapshot(_flush_id);
 		_handle_reserve();
-		RDB_FMT("VCPU{} MC FLUSH{} BEGIN {}b", _id, _flush_id.load(), _pressure)
+		RDB_LOG(mem, "vcpu", _id, "MC FLUSH{} BEGIN {}b", _id, _flush_id.load(), _pressure)
 		_flush_tasks.enqueue(_map, _flush_id++);
 
 		_pressure = 0;

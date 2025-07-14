@@ -23,15 +23,15 @@ namespace rdb
 		std::size_t _shard{ 0 };
 		std::size_t _shard_offset{ 0 };
 		Mapper _smap{};
-		Config* _cfg{ nullptr };
+		Shared _shared{};
 		std::filesystem::path _path{};
 		std::filesystem::path _current{};
 
 		void _replay_shard(std::filesystem::path path, const std::function<void(WriteType, key_type, View, View)>& callback) noexcept;
 	public:
 		Log() = default;
-		Log(Config* cfg, std::filesystem::path path, schema_type schema) :
-			_cfg(cfg),
+		Log(Shared shared, std::filesystem::path path, schema_type schema) :
+			_shared(shared),
 			_path(path),
 			_schema(schema)
 		{}

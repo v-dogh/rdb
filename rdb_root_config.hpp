@@ -1,6 +1,7 @@
 #ifndef RDB_ROOT_CONFIG_HPP
 #define RDB_ROOT_CONFIG_HPP
 
+#include <rdb_runtime_logs.hpp>
 #include <rdb_memunits.hpp>
 #include <filesystem>
 #include <thread>
@@ -72,6 +73,12 @@ namespace rdb
 			// Optimizes for chosen qualities when it comes to CPU usage
 			CPUProfile cpu_profile{ CPUProfile::OptimizeUsage };
 		} mnt;
+		rs::RuntimeLogs::Config rlog;
+	};
+	struct Shared
+	{
+		rs::RuntimeLogs::ptr logs;
+		std::shared_ptr<Config> cfg;
 	};
 }
 

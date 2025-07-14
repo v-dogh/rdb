@@ -262,17 +262,17 @@ namespace rdb
 		mutable RuntimeSchemaReflection::RTSI* _schema_info{ nullptr };
 		mutable std::size_t _schema_version{ 0 };
 
-		std::atomic<bool> _shutdown{ false };
-		std::jthread _flush_thread{};
-		ct::TaskRing<std::pair<std::shared_ptr<write_store>, std::size_t>, 4> _flush_tasks{};
-
 		std::size_t _pressure{ 0 };
 		std::size_t _id{ 0 };
 		std::size_t _lock_cnt{ 0 };
 		lock_store _locks{};
 		schema_type _schema{};
-		Config* _cfg{ nullptr };
-		Log _logs{};
+		Log _disk_logs{};
+		Shared _shared{};
+
+		std::atomic<bool> _shutdown{ false };
+		std::jthread _flush_thread{};
+		ct::TaskRing<std::pair<std::shared_ptr<write_store>, std::size_t>, 4> _flush_tasks{};
 
 		RuntimeSchemaReflection::RTSI& _info() const noexcept;
 		std::size_t _cpu() const noexcept;
@@ -351,7 +351,7 @@ namespace rdb
 			return Origin();
 		}
 
-		MemoryCache(Config* cfg, std::size_t core, schema_type schema);
+		MemoryCache(Shared shared, std::size_t core, schema_type schema);
 		MemoryCache(const MemoryCache&) = delete;
 		MemoryCache(MemoryCache&& copy)
 		{

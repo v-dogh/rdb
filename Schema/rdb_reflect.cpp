@@ -32,8 +32,6 @@ namespace rdb
 	}
 	RuntimeSchemaReflection::RTSI& RuntimeSchemaReflection::reg(schema_type ucode, RTSI info) noexcept
 	{
-		if (fetch(ucode) != nullptr)
-			RDB_WARN("Overriding already existing schema information (either conflicting names or duplicate require expression)")
 		return (_schema_info[ucode] = std::move(info));
 	}
 
