@@ -69,7 +69,7 @@ namespace rdb::byte
 #		ifdef RDB_ALIGNED_READ
 		if (reinterpret_cast<std::uintptr_t>(&value) % alignof(Type) != 0)
 		{
-			std::remove_cvref_t<Type> result;
+			std::decay_t<Type> result;
 			std::memcpy(&result, &value, sizeof(Type));
 			return result;
 		}
@@ -88,7 +88,7 @@ namespace rdb::byte
 #		ifdef RDB_ALIGNED_READ
 		if (reinterpret_cast<std::uintptr_t>(value) % alignof(Type) != 0)
 		{
-			std::remove_cvref_t<Type> aligned{};
+			std::decay_t<Type> aligned{};
 			std::memcpy(&aligned, value, sizeof(Type));
 			return aligned;
 		}
@@ -178,7 +178,7 @@ namespace rdb::byte
 	template<typename Type>
 	constexpr Type byteswap(const void* value) noexcept
 	{
-		std::remove_cvref_t<Type> aligned{};
+		std::decay_t<Type> aligned{};
 		if (reinterpret_cast<std::uintptr_t>(value) % alignof(Type) != 0)
 			std::memcpy(&aligned, value, sizeof(Type));
 		else
@@ -278,7 +278,7 @@ namespace rdb::byte
 	template<typename Type>
 	auto read(std::span<const unsigned char> buffer, std::size_t& ctr) noexcept
 	{
-		std::remove_cvref_t<Type> aligned{};
+		std::decay_t<Type> aligned{};
 		if (reinterpret_cast<std::uintptr_t>(buffer.data()) % alignof(Type) != 0)
 			std::memcpy(&aligned, buffer.data() + ctr, sizeof(Type));
 		else

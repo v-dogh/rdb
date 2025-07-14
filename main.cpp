@@ -82,7 +82,7 @@ using global_entity = rdb::Schema<"GlobalEntity",
 	rdb::Topology<
 		rdb::Field<"Name", rdbt::String>,
 		rdb::Field<"Friends", rdbt::Buffer<rdbt::TimeUUID>>,
-		rdb::Field<"Servers", rdbt::Buffer<rdbt::RandUUID>>,
+		rdb::Field<"Servers", rdbt::Buffer<rdbt::TimeUUID>>,
 		rdb::Field<"OwnedServers", rdbt::Uint64>,
 		rdb::Field<"Flags", rdbt::Bitset<32>>
 	>
@@ -146,7 +146,9 @@ int main()
 		rdb::Config{
 			.root = "/tmp/RDB",
 			.mnt{
-				.cores = 1
+				.cores = 1,
+				.numa = true,
+				.cpu_profile = rdb::Config::Mount::CPUProfile::OptimizeSpeed
 			}
 		}
 	);
@@ -169,44 +171,82 @@ int main()
 	const auto key = std::span<const unsigned char>();
 	const auto icon = std::span<const unsigned char>();
 
+
+	// {
+	// 	const auto key = server::partition::make(id);
+	// 	const auto value = server::make(name, key, 1, 1, 0, icon);
+
+	// 	mnt->run<server>([&](rdb::MemoryCache* cache) {});
+
+	// 	std::atomic<bool> finished = false;
+	// 	std::cout << rdb::util::measure([&]() {
+	// 		mnt->run<server>([&](rdb::MemoryCache* cache) {
+	// 			cache->write(
+	// 				rdb::WriteType::Table,
+	// 				key->hash(),
+	// 				key, nullptr,
+	// 				value,
+	// 				rdb::MemoryCache::origin()
+	// 			);
+	// 			finished.store(true, std::memory_order::release);
+	// 		});
+	// 		while (!finished.load(std::memory_order::acquire));
+	// 		finished = false;
+	// 	}, 10'000) << std::endl;
+
+	// 	mnt->wait();
+	// }
+
 	bool result = false;
 	mnt->query
-		<< rdb::pred(
-			rdb::check<server_by_name>(&result, name)
-			   < rdb::invert(rdb::exists),
-			// Create server
-			rdb::create<server>(
-				id,
-				name,
-				key,
-				1, 1, 0,
-				icon
-			),
-			// Index by name
-			rdb::create<server_by_name>(name, id),
-			// Increment creator server count and push server to list
-			rdb::fetch<global_entity>(uid)
-				| rdb::wproc<"OwnedServers", rdbt::Uint64::Op::Add>(1)
-				| rdb::wproc<"Servers", rdbt::Buffer<rdbt::RandUUID>::Op::Push>(id),
-			// Create owner role
-			rdb::create<role>(
-				id, id,
-				std::string_view("Owner"),
-				rdbt::Bitset<64>::list{ true },
-				rdbt::Bitset<64>::list{},
-				rdbt::Bitset<64>::list{},
-				0, ~std::uint32_t(0)
-			),
-			// Index user
-			rdb::create<server_user_index>(
-				id, 0, id, uid,
-				username
-			),
-			// Give user the owner role
-			rdb::create<entity>(id, uid, id, created)
+		<< rdb::lock<server>(&result, id,
+			rdb::pred(
+				rdb::check<server_by_name>(&result, name)
+				   < rdb::invert(rdb::exists),
+				rdb::atomic(
+					// Create server
+					rdb::create<server>(
+						id,
+						name,
+						key,
+						1, 1, 0,
+						icon
+					),
+					// Index by name
+					rdb::create<server_by_name>(name, id),
+					// // Increment creator server count and push server to list
+					rdb::fetch<global_entity>(uid)
+					| rdb::wproc<"OwnedServers", rdbt::Uint64::Op::Add>(1)
+					| rdb::wproc<"Servers", rdbt::Buffer<rdbt::TimeUUID>::Op::Push>(id),
+					// Create owner role
+					rdb::create<role>(
+						id, id,
+						std::string_view("Owner"),
+						rdbt::Bitset<64>::list{ true },
+						rdbt::Bitset<64>::list{},
+						rdbt::Bitset<64>::list{},
+						0, ~std::uint32_t(0)
+					),
+					// Index user
+					rdb::create<server_user_index>(
+						id, 0, id, uid,
+						username
+					),
+					// Give user the owner role
+					rdb::create<entity>(id, uid, id, created)
+				)
+			)
 		)
-		<< rdb::execute<rdb::Policy::Atomic>;
-	std::cout << std::boolalpha << result << std::endl;
+		<< rdb::execute<>;
+
+	global_entity::interface_view<"Servers"> svs;
+	mnt->query
+		<< rdb::compose(
+			rdb::fetch<global_entity>(uid)
+			| rdb::read<"Servers">(&svs)
+		)
+		<< rdb::execute<>;
+	std::cout << svs->print() << std::endl;
 
 	mnt->wait();
 }

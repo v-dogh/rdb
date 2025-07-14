@@ -24,7 +24,12 @@ namespace rdb
 		using read_callback = std::function<void(std::size_t, View)>;
 		using field_bitmap = std::bitset<256>;
 		using WriteType = rdb::WriteType;
-		using ReadType = rdb::ReadType;
+		struct Origin
+		{
+			std::thread::id tid{ std::this_thread::get_id() };
+
+			auto operator<=>(const Origin& origin) const noexcept = default;
+		};
 	private:
 		enum class DataType : unsigned char
 		{
@@ -131,6 +136,85 @@ namespace rdb
 				ct::ordered_byte_map<Slot>::delete_node(slot);
 			}
 		};
+		struct alignas (std::atomic<std::chrono::system_clock::time_point>) LockData
+		{
+			using ref = std::atomic_ref<std::chrono::system_clock::time_point>;
+
+			static constexpr auto max = std::chrono::seconds(15);
+
+			std::chrono::system_clock::time_point timestamp{};
+			Origin origin{};
+
+			bool expired_auto() const noexcept
+			{
+				return std::chrono::system_clock::now() - timestamp > max;
+			}
+			bool expired_man() const noexcept
+			{
+				return timestamp == std::chrono::system_clock::time_point();
+			}
+			bool expired() const noexcept
+			{
+				return
+					expired_man() ||
+					expired_auto();
+			}
+			void lock(Origin source) noexcept
+			{
+				auto lock = ref(timestamp);
+				lock = std::chrono::system_clock::now();
+				source = source;
+				lock.notify_all();
+			}
+			void unlock() noexcept
+			{
+				auto lock = ref(timestamp);
+				lock = std::chrono::system_clock::time_point();
+				lock.notify_all();
+			}
+
+			static auto allocation_size(std::chrono::system_clock::time_point, Origin) noexcept
+			{
+				return sizeof(LockData);
+			}
+			static auto allocation_size() noexcept
+			{
+				return sizeof(LockData);
+			}
+		};
+		struct Lock
+		{
+		private:
+			LockData* _lock{ nullptr };
+		public:
+			Lock(std::nullptr_t) {}
+			Lock(LockData& lock)
+				: _lock(&lock) {}
+			Lock(const Lock&) = delete;
+			Lock(Lock&&) = default;
+
+			bool is_ready() const noexcept
+			{
+				return _lock != nullptr;
+			}
+			void wait() noexcept
+			{
+				if (_lock == nullptr)
+					return;
+
+				auto lock = LockData::ref(_lock->timestamp);
+				auto expected = lock.load();
+				while (expected != std::chrono::system_clock::time_point() &&
+					   expected - std::chrono::system_clock::now() < LockData::max)
+				{
+					lock.wait(expected);
+					expected = lock.load();
+				}
+			}
+
+			Lock& operator=(const Lock&) = delete;
+			Lock& operator=(Lock&& copy) noexcept = default;
+		};
 		struct PartitionMetadata
 		{
 			std::uint64_t version{};
@@ -152,6 +236,16 @@ namespace rdb
 					partition_variant
 				>
 			>;
+
+		using lock_type = LockData*;
+		using single_lock = LockData;
+		using partition_lock = ct::ordered_byte_map<LockData>;
+		using lock_partition_variant = std::variant<single_lock, partition_lock>;
+		using lock_store =
+			ct::hash_map<
+				key_type,
+				lock_partition_variant
+			>;
 	private:
 		std::filesystem::path _path{};
 		std::atomic<std::size_t> _flush_running{ 0 };
@@ -164,14 +258,20 @@ namespace rdb
 		mutable std::size_t _mappings{ 0 };
 		mutable std::size_t _descriptors{ 0 };
 
+		mutable RuntimeSchemaReflection::RTSI* _schema_info{ nullptr };
+		mutable std::size_t _schema_version{ 0 };
+
 		std::size_t _pressure{ 0 };
 		std::size_t _id{ 0 };
+		std::size_t _lock_cnt{ 0 };
+		lock_store _locks{};
 		schema_type _schema{};
 		Config* _cfg{ nullptr };
 		Log _logs{};
 
+		RuntimeSchemaReflection::RTSI& _info() const noexcept;
 		std::size_t _cpu() const noexcept;
-		void _push_bytes(std::size_t) noexcept;
+		void _push_bytes(int) noexcept;
 
 		FlushHandle& _handle_open(std::size_t flush) const noexcept;
 		void _handle_reserve(bool ready = false) const noexcept;
@@ -210,6 +310,10 @@ namespace rdb
 		slot _resize_unsorted_slot(write_store::iterator partition, std::size_t size);
 		slot _resize_slot(write_store::iterator partition, const View& sort, std::size_t size);
 
+		lock_type _emplace_sorted_lock_if(lock_store::iterator partition, const View& sort);
+		lock_type _emplace_unsorted_lock_if(lock_store::iterator partition);
+		lock_type _emplace_lock_if(key_type key, const View& sort);
+
 		void _write_impl(write_store::iterator partition, WriteType type, const View& sort, std::span<const unsigned char> data) noexcept;
 		void _reset_impl(write_store::iterator partition, const View& sort) noexcept;
 		void _remove_impl(write_store::iterator partition, const View& sort) noexcept;
@@ -237,6 +341,11 @@ namespace rdb
 
 		void _move(MemoryCache&& copy) noexcept;
 	public:
+		static auto origin() noexcept
+		{
+			return Origin();
+		}
+
 		MemoryCache(Config* cfg, std::size_t core, schema_type schema);
 		MemoryCache(const MemoryCache&) = delete;
 		MemoryCache(MemoryCache&& copy)
@@ -253,9 +362,14 @@ namespace rdb
 		bool read(key_type key, const View& sort, field_bitmap fields, const read_callback& callback) noexcept;
 		bool exists(key_type key, const View& sort) noexcept;
 
-		void write(WriteType type, key_type key, const View& partition, const View& sort, std::span<const unsigned char> data) noexcept;
-		void reset(key_type key, const View& partition, const View& sort) noexcept;
-		void remove(key_type key, const View& sort) noexcept;
+		void write(WriteType type, key_type key, const View& partition, const View& sort, std::span<const unsigned char> data, Origin origin) noexcept;
+		void reset(key_type key, const View& partition, const View& sort, Origin origin) noexcept;
+		void remove(key_type key, const View& sort, Origin origin) noexcept;
+
+		Lock lock(key_type key, const View& sort, Origin origin) noexcept;
+		bool unlock(key_type key, const View& sort, Origin origin) noexcept;
+		bool is_locked(key_type key, const View& sort, Origin origin) noexcept;
+
 		void flush() noexcept;
 		void clear() noexcept;
 

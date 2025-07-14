@@ -139,9 +139,10 @@ namespace rdb
 	namespace cmd
 	{
 		template<typename... Ops>
+		// requires (std::is_same_v<std::decay_t<Ops>, Ops> && ...)
 		struct OperationChain :
 			OperationChainTrait,
-			std::conditional_t<std::is_base_of_v<ControlFlowTrait, std::remove_cvref_t<std::tuple_element_t<0, std::tuple<Ops...>>>>, ControlFlowTrait, FallbackTrait>
+			std::conditional_t<std::is_base_of_v<ControlFlowTrait, std::decay_t<std::tuple_element_t<0, std::tuple<Ops...>>>>, ControlFlowTrait, FallbackTrait>
 		{
 			template<typename... Op> using append_ops = OperationChain<Ops..., Op...>;
 			template<typename... Op> using pre_append_ops = OperationChain<Op..., Ops...>;
@@ -165,7 +166,7 @@ namespace rdb
 					);
 				}(std::make_index_sequence<sizeof...(Ops)>());
 
-				using sub = std::remove_cvref_t<decltype(tup)>;
+				using sub = std::decay_t<decltype(tup)>;
 				if constexpr (std::is_same_v<sub, std::tuple<>>)
 				{
 					return nullptr;
@@ -190,7 +191,7 @@ namespace rdb
 					return
 						(ops.size() + ...) +
 						sizeof...(Ops) +
-						((sizeof(std::uint32_t) * std::is_base_of_v<ControlFlowTrait, std::remove_cvref_t<Ops>>) + ...);
+						((sizeof(std::uint32_t) * std::is_base_of_v<ControlFlowTrait, std::decay_t<Ops>>) + ...);
 				}, ops);
 			}
 			constexpr void fill(std::span<unsigned char> buffer) noexcept
@@ -251,18 +252,14 @@ namespace rdb
 				return
 					sizeof(schema_type) +
 					key.first.size() +
-					key.second.size() + (sizeof(std::uint32_t) * !key.second.empty());
+					key.second.size();
 			}
 			constexpr auto fill(std::span<unsigned char> buffer) noexcept
 			{
 				std::size_t off = 0;
 				off += byte::swrite<schema_type>(buffer, off, Schema::ucode);
 				off += byte::swrite(buffer, off, key.first.data());
-				if (!key.second.empty())
-				{
-					off += byte::swrite<std::uint32_t>(buffer, off, key.second.size());
-					off += byte::swrite(buffer, off, key.second.data());
-				}
+				off += byte::swrite(buffer, off, key.second.data());
 				return off;
 			}
 		};
@@ -328,11 +325,7 @@ namespace rdb
 				std::size_t off = 0;
 				off += byte::swrite<schema_type>(buffer, off, Schema::ucode);
 				off += byte::swrite(buffer, off, key.first.data());
-				if (!key.second.empty())
-				{
-					off += byte::swrite<std::uint32_t>(buffer, off, key.second.size());
-					off += byte::swrite(buffer, off, key.second.data());
-				}
+				off += byte::swrite(buffer, off, key.second.data());
 				off += byte::swrite(buffer, off, count);
 				return off;
 			}
@@ -376,18 +369,14 @@ namespace rdb
 				return
 					sizeof(schema_type) +
 					key.first.size() +
-					key.second.size() + (sizeof(std::uint32_t) * !key.second.empty());
+					key.second.size();
 			}
 			constexpr auto fill(std::span<unsigned char> buffer) noexcept
 			{
 				std::size_t off = 0;
 				off += byte::swrite<schema_type>(buffer, off, Schema::ucode);
 				off += byte::swrite(buffer, off, key.first.data());
-				if (!key.second.empty())
-				{
-					off += byte::swrite<std::uint32_t>(buffer, off, key.second.size());
-					off += byte::swrite(buffer, off, key.second.data());
-				}
+				off += byte::swrite(buffer, off, key.second.data());
 				return off;
 			}
 		};
@@ -408,18 +397,14 @@ namespace rdb
 				return
 					sizeof(schema_type) +
 					key.first.size() +
-					key.second.size() + (sizeof(std::uint32_t) * !key.second.empty());;
+					key.second.size();
 			}
 			constexpr auto fill(std::span<unsigned char> buffer) noexcept
 			{
 				std::size_t off = 0;
 				off += byte::swrite<schema_type>(buffer, off, Schema::ucode);
 				off += byte::swrite(buffer, off, key.first.data());
-				if (!key.second.empty())
-				{
-					off += byte::swrite<std::uint32_t>(buffer, off, key.second.size());
-					off += byte::swrite(buffer, off, key.second.data());
-				}
+				off += byte::swrite(buffer, off, key.second.data());
 				return off;
 			}
 			constexpr auto eval(std::span<const unsigned char> buffer) const noexcept
@@ -429,9 +414,40 @@ namespace rdb
 			}
 		};
 
-		// Conditionals
+		// Control flow
 
 		using If = Command<qOp::If, ControlFlowTrait>;
+		using Atomic = Command<qOp::Atomic, ControlFlowTrait>;
+
+		template<typename Schema>
+		struct Lock : Operand<qOp::Lock>, ControlFlowTrait, EvalTrait
+		{
+			using schema = Schema;
+
+			std::function<void(bool)> callback{};
+			compound_key key{};
+
+			constexpr auto size() const noexcept
+			{
+				return
+					sizeof(schema_type) +
+					key.first.size() +
+					key.second.size();
+			}
+			constexpr auto fill(std::span<unsigned char> buffer) noexcept
+			{
+				std::size_t off = 0;
+				off += byte::swrite<schema_type>(buffer, off, Schema::ucode);
+				off += byte::swrite(buffer, off, key.first.data());
+				off += byte::swrite(buffer, off, key.second.data());
+				return off;
+			}
+			constexpr auto eval(std::span<const unsigned char> buffer) const noexcept
+			{
+				callback(buffer[0]);
+				return 1;
+			}
+		};
 
 		// Mutants
 
@@ -992,17 +1008,64 @@ namespace rdb
 	constexpr auto pred(cmd::OperationChain<cmd::Check<Schema>, Cond> condition, Expr... ops) noexcept
 	{
 		return cmd::OperationChain(
+			std::tuple_cat(
+				std::make_tuple(cmd::If()),
+				std::move(condition.ops),
+				[&]() {
+					if constexpr (std::is_base_of_v<cmd::OperationChainTrait, Expr>)
+						return std::move(ops.ops);
+					else
+						return std::make_tuple(std::move(ops));
+				}()...
+			)
+		);
+	}
+
+	template<typename... Expr>
+	constexpr auto atomic(Expr... ops) noexcept
+	{
+		return cmd::OperationChain(
+			std::tuple_cat(
+				std::make_tuple(cmd::Atomic()),
+				[&]() {
+					if constexpr (std::is_base_of_v<cmd::OperationChainTrait, Expr>)
+						return std::move(ops.ops);
+					else
+						return std::make_tuple(std::move(ops));
+				}()...
+			)
+		);
+	}
+
+	template<typename Schema, typename Func, typename... Expr>
+	constexpr auto lock(Func&& func, Expr... ops) noexcept
+	{
+		constexpr auto keys = Schema::partition::fields + Schema::data::sort_count;
+		std::tuple args = std::forward_as_tuple(ops...);
+		return [&]<std::size_t... Idx, std::size_t... Idv>(std::index_sequence<Idx...>, std::index_sequence<Idv...>) {
+			return cmd::OperationChain(
 				std::tuple_cat(
-					std::forward_as_tuple(cmd::If()),
-					std::move(condition.ops),
-					[&]() {
-						if constexpr (std::is_base_of_v<cmd::OperationChainTrait, Expr>)
-							return std::move(ops.ops);
+					std::make_tuple(cmd::Lock<Schema>{
+						.callback = std::forward<Func>(func),
+						.key = cmd::keyset<Schema>(std::get<Idv>(args)...)
+					}),
+					[&] {
+						if constexpr (std::is_base_of_v<cmd::OperationChainTrait, std::decay_t<std::tuple_element_t<Idx + keys, std::tuple<Expr...>>>>)
+							return std::move(std::get<Idx + keys>(args).ops);
 						else
-							return std::forward_as_tuple(std::move(ops));
+							return std::make_tuple(std::move(std::get<Idx + keys>(args)));
 					}()...
 				)
 			);
+		}(std::make_index_sequence<sizeof...(Expr) - keys>(), std::make_index_sequence<keys>());
+	}
+
+	template<typename Schema, typename... Expr>
+	constexpr auto lock(bool* out, Expr&&... ops) noexcept
+	{
+		return lock<Schema>([out](bool result) {
+			*out = result;
+		}, std::forward<Expr>(ops)...);
 	}
 
 	// Mutants
@@ -1099,15 +1162,15 @@ namespace rdb
 		template<typename Type>
 		decltype(auto) operator<<(Type&& cmd) noexcept
 		{
-			if constexpr (std::is_same_v<std::remove_cvref_t<Type>, cmd::Flush>)
+			if constexpr (std::is_same_v<std::decay_t<Type>, cmd::Flush>)
 			{
 				_sync();
 				_qbuffer(0);
 				return *this;
 			}
-			else if constexpr (std::is_base_of_v<cmd::ExecuteTrait, std::remove_cvref_t<Type>>)
+			else if constexpr (std::is_base_of_v<cmd::ExecuteTrait, std::decay_t<Type>>)
 			{
-				constexpr auto flags = std::remove_cvref_t<Type>::flags;
+				constexpr auto flags = std::decay_t<Type>::flags;
 				if constexpr (flags & unsigned(Policy::Async))
 				{
 					// auto f = static_cast<Base*>(this)->query_async(
@@ -1125,10 +1188,10 @@ namespace rdb
 						const auto result = static_cast<Base*>(this)->query_sync(
 							_qbuffer(~0ull), _build_store(nullptr)
 						);
-						_qbuffer(0);
 						if (result)
 							static_cast<Base*>(this)->_resolve_query(qid);
 						cmd.resolve(result);
+						_qbuffer(0);
 					}
 					else
 					{
@@ -1142,7 +1205,7 @@ namespace rdb
 			}
 			else
 			{
-				using type = std::remove_cvref_t<Type>;
+				using type = std::decay_t<Type>;
 
 				constexpr auto skip_op = std::is_base_of_v<cmd::OperationChainTrait, type>;
 				constexpr auto skip_size = !std::is_base_of_v<cmd::ControlFlowTrait, type> || skip_op;
@@ -1162,7 +1225,7 @@ namespace rdb
 				std::size_t off = 0;
 
 				auto r = cmd.extract();
-				if constexpr (!std::is_same_v<std::remove_cvref_t<decltype(r)>, std::nullptr_t>)
+				if constexpr (!std::is_same_v<std::decay_t<decltype(r)>, std::nullptr_t>)
 				{
 					buffer[off++] = OperandFlags::Reads;
 					_build_store(std::move(r));

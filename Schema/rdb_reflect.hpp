@@ -1,7 +1,7 @@
 #ifndef RDB_REFLECT_HPP
 #define RDB_REFLECT_HPP
 
-#include <unordered_map>
+#include <rdb_containers.hpp>
 #include <rdb_utils.hpp>
 #include <rdb_keytype.hpp>
 
@@ -23,12 +23,14 @@ namespace rdb
 	};
 	enum wproc_type : wproc_query_result
 	{
+		//
+		Reserved,
 		// Storage stays constant
 		Static,
 		// Storage changes
 		Dynamic,
 		// Writes only a delta
-		Delta
+		Delta,
 	};
 	enum wproc_status : wproc_query_result
 	{
@@ -164,6 +166,25 @@ namespace rdb
 		}
 	};
 
+	struct FieldWriteApplyState
+	{
+		std::size_t size{ 0 };
+		std::size_t capacity{ ~0ull };
+
+		std::size_t internal_field_offset{ ~0ull };
+		std::size_t internal_field_size{ 0 };
+	};
+	struct WriteProcApplyState
+	{
+		std::size_t size{ 0 };
+		std::size_t capacity{ ~0ull };
+
+		std::size_t internal_field_offset{ ~0ull };
+		std::size_t internal_field_size{ 0 };
+		std::size_t internal_wproc_required_size{ 0 };
+		wproc_type internal_wproc_type{ wproc_type::Reserved };
+	};
+
 	class RuntimeInterfaceReflection
 	{
 	public:
@@ -181,7 +202,7 @@ namespace rdb
 			CompressorHandle(*compress)(){ nullptr };
 		};
 	private:
-		static inline std::unordered_map<std::size_t, RTII> _interface_info{};
+		static inline ct::hash_map<std::size_t, RTII> _interface_info{};
 	public:
 		RuntimeInterfaceReflection() = delete;
 
@@ -198,8 +219,8 @@ namespace rdb
 			std::size_t(*cstorage)(const View&);
 			std::size_t(*storage)(const void*);
 
-			std::size_t(*fwapply)(void*, std::size_t, const View&, std::size_t);
-			std::size_t(*wpapply)(void*, std::size_t, proc_opcode, const proc_param&, std::size_t);
+			std::size_t(*fwapply)(void*, std::size_t, const View&, FieldWriteApplyState&);
+			std::size_t(*wpapply)(void*, std::size_t, proc_opcode, const proc_param&, WriteProcApplyState&);
 
 			View(*cfield)(const void*, std::size_t);
 			View(*field)(void*, std::size_t);
@@ -228,13 +249,18 @@ namespace rdb
 			std::size_t(*prefix)(const void*, View);
 		};
 	private:
-		static inline std::unordered_map<schema_type, RTSI> _schema_info{};
+		static inline std::atomic_flag _lock{};
+		static inline ct::hash_map<schema_type, RTSI> _schema_info{};
+		static inline std::size_t _version{ 0 };
 	public:
 		RuntimeSchemaReflection() = delete;
 
 		static RTSI* fetch(schema_type version) noexcept;
 		static RTSI& info(schema_type version) noexcept;
 		static RTSI& reg(schema_type version, RTSI info) noexcept;
+
+		static bool stale(std::size_t id) noexcept;
+		static std::pair<std::size_t, RTSI*> version(schema_type version) noexcept;
 	};
 }
 

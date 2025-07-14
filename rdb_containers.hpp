@@ -136,10 +136,65 @@ namespace rdb::ct
 				}
 				return node;
 			}
+			template<typename... Argv>
+			pointer emplace(const_key key, Argv&&... args) noexcept
+			{
+				auto* buffer = allocate_node(std::forward<Argv>(args)...);
+				if (auto* ptr = art_insert(
+						&_tree,
+						key.data(),
+						key.size(),
+						buffer
+					); ptr != nullptr)
+				{
+					return ptr;
+				}
+				return buffer;
+			}
+			template<typename... Argv>
+			pointer emplace(const_key key, Node* node) noexcept
+			{
+				if (auto* ptr = art_insert_no_replace(
+						&_tree,
+						key.data(),
+						key.size(),
+						node
+					); ptr != nullptr)
+				{
+					return ptr;
+				}
+				return node;
+			}
+			template<typename... Argv>
+			pointer try_emplace(const_key key, Argv&&... args) noexcept
+			{
+				if (const auto f = find(key); f == nullptr)
+				{
+					return insert(key, std::forward<Argv>(args)...);
+				}
+				else
+				{
+					return f;
+				}
+			}
+			template<typename... Argv>
+			pointer try_emplace(const_key key, Node* node) noexcept
+			{
+				if (const auto f = find(key); f == nullptr)
+				{
+					return insert(key, node);
+				}
+				else
+				{
+					return f;
+				}
+			}
 			void remove(const_key key) noexcept
 			{
 				delete_node(
-					art_delete(&_tree, key.data(), key.size())
+					static_cast<pointer>(
+						art_delete(&_tree, key.data(), key.size())
+					)
 				);
 			}
 

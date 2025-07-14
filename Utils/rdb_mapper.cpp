@@ -4,6 +4,18 @@
 
 namespace rdb
 {
+	void Mapper::_move(Mapper&& copy) noexcept
+	{
+		_memory = copy._memory;
+		_length = copy._length;
+		_vmap = copy._vmap;
+		_filepath = std::move(copy._filepath);
+		_hint = copy._hint;
+		_open = copy._open;
+		_descriptor = copy._descriptor;
+		copy._descriptor = -1;
+	}
+
 	bool Mapper::is_mapped() const noexcept
 	{
 		return _descriptor != -1;
@@ -229,7 +241,7 @@ namespace rdb
 #		ifdef __unix__
 			if (_memory != nullptr)
 			{
-				unmap();
+				unmap(true);
 			}
 			else
 			{

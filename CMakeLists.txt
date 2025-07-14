@@ -70,6 +70,7 @@ add_executable(RDB main.cpp
 
     Utils/rdb_utils.hpp
     Utils/rdb_utils.cpp
+    Utils/rdb_task_ring.hpp
     Utils/rdb_shared_buffer.hpp
     Utils/rdb_shared_buffer.cpp
     Utils/rdb_mapper.hpp

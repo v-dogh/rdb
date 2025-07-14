@@ -724,12 +724,19 @@ namespace rdb
 		}
 	};
 
+	namespace cmp
+	{
+		template<typename>
+		struct is_typed_view : std::false_type {};
+		template<typename Type>
+		struct is_typed_view<TypedView<Type>> : std::true_type {};
+	}
 	namespace util
 	{
 		void spinlock_yield() noexcept;
 
 		template<typename Type>
-		void nano_wait(const std::atomic<Type>& var, const Type& value, std::memory_order order = std::memory_order::acquire) noexcept
+		void nano_wait_for(const std::atomic<Type>& var, const Type& value, std::memory_order order = std::memory_order::acquire) noexcept
 		{
 			for (int i = 0; i < 1000; ++i)
 			{

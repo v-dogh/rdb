@@ -23,6 +23,8 @@ namespace rdb::cmd
 		// Control flow
 
 		If,
+		Atomic,
+		Lock,
 		Barrier,
 
 		// Fetch operators

@@ -358,6 +358,7 @@ namespace rdb::type
 					)->value();
 				return _bits.test(idx);
 			}
+			return false;
 		}
 	};
 }

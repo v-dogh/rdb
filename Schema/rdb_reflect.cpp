@@ -36,4 +36,13 @@ namespace rdb
 			RDB_WARN("Overriding already existing schema information (either conflicting names or duplicate require expression)")
 		return (_schema_info[ucode] = std::move(info));
 	}
+
+	bool RuntimeSchemaReflection::stale(std::size_t id) noexcept
+	{
+		return _version == id;
+	}
+	std::pair<std::size_t, RuntimeSchemaReflection::RTSI*> RuntimeSchemaReflection::version(schema_type ucode) noexcept
+	{
+		return { _version, fetch(ucode) };
+	}
 }

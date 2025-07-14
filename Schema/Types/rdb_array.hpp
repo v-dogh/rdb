@@ -385,13 +385,16 @@ namespace rdb::type
 
 		wproc_query_result wproc(proc_opcode opcode, const proc_param& arguments, wproc_query query) noexcept
 		{
-
+			return wproc_type::Static;
 		}
 		rproc_result rproc(proc_opcode opcode, const proc_param&) const noexcept
 		{
-
+			return nullptr;
 		}
-		bool fproc(proc_opcode opcode, const proc_param& arguments) const noexcept { }
+		bool fproc(proc_opcode opcode, const proc_param& arguments) const noexcept
+		{
+			return false;
+		}
 	};
 
 	template<std::size_t Size, typename Type>

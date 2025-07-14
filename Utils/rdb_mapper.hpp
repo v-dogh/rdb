@@ -47,10 +47,12 @@ namespace rdb
 		Access _hint{ Access::Default };
 		unsigned char _open{};
 		int _descriptor{ -1 };
+
+		void _move(Mapper&& copy) noexcept;
 	public:
 		Mapper() noexcept = default;
 		Mapper(const Mapper&) noexcept = delete;
-		Mapper(Mapper&&) noexcept = default;
+		Mapper(Mapper&& copy) noexcept { _move(std::move(copy)); }
 		~Mapper() noexcept { close(); }
 
 		bool is_mapped() const noexcept;
@@ -109,7 +111,7 @@ namespace rdb
 		void hint(Access acc) noexcept;
 
 		Mapper& operator=(const Mapper&) = delete;
-		Mapper& operator=(Mapper&&) = default;
+		Mapper& operator=(Mapper&& copy) noexcept { _move(std::move(copy)); return *this; }
 	};
 }
 

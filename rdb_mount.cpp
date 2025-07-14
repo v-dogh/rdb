@@ -38,7 +38,6 @@ namespace rdb
 			for (decltype(auto) it : _threads)
 			{
 				it.stop = true;
-				it.sem->release();
 				if (it.thread.joinable())
 					it.thread.join();
 			}
@@ -54,7 +53,6 @@ namespace rdb
 		_threads.resize(_cfg.mnt.cores);
 		for (std::size_t i = 0; i < _cfg.mnt.cores; i++)
 		{	
-			_threads[i].sem = Thread::make_sem();
 			_threads[i].thread = std::thread([this, i]() {
 				RDB_FMT("Starting core{}", i);
 
@@ -78,31 +76,40 @@ namespace rdb
 
 				// Replay all logs
 
+				for (decltype(auto) it : std::filesystem::directory_iterator(path))
 				{
-					for (decltype(auto) it : std::filesystem::directory_iterator(path))
-					{
-						const auto s = it.path().filename().string();
-						const schema_type schema =
-							uuid::decode(
-								s.substr(1, s.size() - 2),
-								uuid::table_alnum
-							);
-						schemas.emplace(
-							std::piecewise_construct,
-							std::forward_as_tuple(schema),
-							std::forward_as_tuple(&_cfg, i, schema)
+					const auto s = it.path().filename().string();
+					const schema_type schema =
+						uuid::decode(
+							s.substr(1, s.size() - 2),
+							uuid::table_alnum
 						);
-					}
+					schemas.emplace(
+						std::piecewise_construct,
+						std::forward_as_tuple(schema),
+						std::forward_as_tuple(&_cfg, i, schema)
+					);
 				}
 
 				// Wait for requests
 
+				constexpr auto spin_iters = 500;
+				constexpr auto yield_iters = 10'000;
+
+				std::size_t spin_ctr = 0;
+				std::size_t yield_ctr = 0;
+
 				while (true)
 				{
-					_threads[i].sem->acquire();
-					std::pair<schema_type, std::function<void(MemoryCache*)>> task;
-					if (_threads[i].queue.try_dequeue(task))
+					auto& t = _threads[i];
+					Thread::task task;
+					if (_cfg.mnt.cpu_profile == Config::Mount::CPUProfile::OptimizeUsage ?
+							t.queue.dequeue(task) :
+							t.queue.try_dequeue(task))
 					{
+						[[ unlikely ]] if (task.second == nullptr)
+							break;
+
 						auto f = schemas.find(task.first);
 						[[ unlikely ]] if (f == schemas.end())
 						{
@@ -113,11 +120,19 @@ namespace rdb
 							).first;
 						}
 						task.second(&f->second);
+
+						spin_ctr = 0;
+						yield_ctr = 0;
+
+						continue;
 					}
-					if (_threads[i].stop)
-					{
-						break;
-					}
+
+					if (++spin_ctr < spin_iters)
+						util::spinlock_yield();
+					else if (++yield_ctr < yield_iters)
+						std::this_thread::yield();
+					else if (_cfg.mnt.cpu_profile == Config::Mount::CPUProfile::OptimizeSpeed)
+						std::this_thread::sleep_for(std::chrono::microseconds(50));
 				}
 			});
 		}
@@ -127,16 +142,19 @@ namespace rdb
 	void Mount::stop() noexcept
 	{
 		RDB_LOG("Attempting to stop");
-		std::lock_guard lock(_mtx);
-		for (decltype(auto) it : _threads)
 		{
-			it.stop = true;
-			it.sem->release();
-			if (it.thread.joinable())
-				it.thread.join();
+			std::lock_guard lock(_mtx);
+			for (decltype(auto) it : _threads)
+			{
+				it.stop = true;
+				it.launch(0, nullptr);
+				if (it.thread.joinable())
+					it.thread.join();
+			}
+			_threads.clear();
+			_status = Status::Stopped;
 		}
-		_threads.clear();
-		_status = Status::Stopped;
+		_cv.notify_all();
 	}
 	void Mount::wait() noexcept
 	{
@@ -321,9 +339,14 @@ namespace rdb
 		std::tuple<std::size_t, View> result{};
 		auto& [ off, sort ] = result;
 
-		if (inf.skeys())
+		if (const auto cnt = inf.skeys(); cnt)
 		{
-			const auto size = byte::sread<std::uint32_t>(packet, off);
+			std::size_t size = 0;
+			for (std::size_t i = 0; i < cnt; i++)
+			{
+				RuntimeInterfaceReflection::RTII& field = inf.reflect_skey(i);
+				size += field.storage(packet.data() + off);
+			}
 			sort = View::view(packet.subspan(off, size));
 			off += size;
 		}
@@ -376,14 +399,14 @@ namespace rdb
 		off += data.size();
 
 		state.acquire();
-		core.launch(Thread::task(schema, [=, &state, this](MemoryCache* cache) {
+		core.launch(schema, [=, ctx = MemoryCache::origin(), &state, this](MemoryCache* cache) {
 			cache->write(
 				WriteType::Table,
 				key, pkey, nullptr,
-				data
+				data, ctx
 			);
 			state.release();
-		}));
+		});
 
 		return off;
 	}
@@ -399,10 +422,10 @@ namespace rdb
 		auto& core = _threads[_vcpu(key)];
 
 		state.acquire();
-		core.launch(Thread::task(schema, [=, &state, this](MemoryCache* cache) {
-			cache->remove(key, sort);
+		core.launch(schema, [=, ctx = MemoryCache::origin(), &state, this](MemoryCache* cache) {
+			cache->remove(key, sort, ctx);
 			state.release();
-		}));
+		});
 
 		return off;
 	}
@@ -418,13 +441,13 @@ namespace rdb
 		auto& core = _threads[_vcpu(key)];
 		const auto count = byte::sread<std::uint32_t>(packet, off);
 		state.acquire();
-		core.launch(Thread::task(schema, [=, &state, this](MemoryCache* cache) {
+		core.launch(schema, [=, &state, this](MemoryCache* cache) {
 			state.push(cache->page(key, count), ParserInfo{
 				.operand_idx = info.operand_idx,
 				.operator_idx = 0
 			});
 			state.release();
-		}));
+		});
 
 		return off;
 	}
@@ -440,13 +463,13 @@ namespace rdb
 		auto& core = _threads[_vcpu(key)];
 		const auto count = byte::sread<std::uint32_t>(packet, off);
 		state.acquire();
-		core.launch(Thread::task(schema, [=, &state, this](MemoryCache* cache) {
+		core.launch(schema, [=, &state, this](MemoryCache* cache) {
 			state.push(cache->page_from(key, sort, count), ParserInfo{
 				.operand_idx = info.operand_idx,
 				.operator_idx = 0
 			});
 			state.release();
-		}));
+		});
 
 		return off;
 	}
@@ -483,19 +506,102 @@ namespace rdb
 		ControlFlowInfo cfi;
 		cfi.set_chain(byte::sread<std::uint32_t>(packet, off));
 
+		const auto total = cfi.get_chain() + sizeof(std::uint32_t);
 		[[ likely ]] if (const auto op = packet[off++]; op < _op_parse_table.size())
 		{
 			const auto func = _op_parse_table[op];
 			off += (this->*func)(packet.subspan(off), state, cfi, info);
 		}
-		if (const auto op = packet[off++]; op < _op_parse_table.size() && cfi.get())
+		if (cfi.get())
 		{
-			const auto func = _op_parse_table[op];
-			off += (this->*func)(packet.subspan(off), state, cfi, info);
-			return off;
+			while (off != total)
+			{
+				const auto op = packet[off++];
+				if (op < _op_parse_table.size())
+				{
+					const auto func = _op_parse_table[op];
+					off += (this->*func)(packet.subspan(off), state, cfi, info);
+				}
+				else
+				{
+					return ~0ull;
+				}
+			}
+			return total;
 		}
-		else
-			return cfi.get_chain() + sizeof(std::uint32_t);
+		return total;
+	}
+	std::size_t Mount::_query_parse_op_atomic(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept
+	{
+		std::size_t off = 0;
+
+		cfi.set_chain(byte::sread<std::uint32_t>(packet, off));
+
+		const auto total = cfi.get_chain() + sizeof(std::uint32_t);
+		const auto qid = _log_query(packet.subspan(off, cfi.get_chain()));
+		while (off != total)
+		{
+			const auto op = packet[off++];
+			if (op < _op_parse_table.size())
+			{
+				const auto func = _op_parse_table[op];
+				off += (this->*func)(packet.subspan(off), state, cfi, info);
+			}
+			else
+			{
+				return ~0ull;
+			}
+		}
+		_resolve_query(qid);
+		return off;
+	}
+	std::size_t Mount::_query_parse_op_lock(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo&, ParserInfo info) noexcept
+	{
+		std::size_t off = 0;
+
+		ControlFlowInfo cfi;
+		cfi.set_chain(byte::sread<std::uint32_t>(packet, off));
+
+		const auto [ off1, schema, inf ] = _query_parse_op_rtsi(packet.subspan(off), state, info); off += off1;
+		if (inf == nullptr) return off1;
+		const auto [ off2, pkey, key ] = _query_parse_op_pkey(packet.subspan(off), *inf, state, info); off += off2;
+		const auto [ off3, sort ] = _query_parse_op_skey(packet.subspan(off), *inf, state, info); off += off3;
+
+		auto& core = _threads[_vcpu(key)];
+		const auto op_idx = info.operator_idx++;
+
+		core.launch(schema, [&, ctx = MemoryCache::origin(), order = cfi.order(), this](MemoryCache* cache) {
+			auto lock = cache->lock(key, sort, ctx);
+			auto v = View::copy(1);
+			v.mutate()[0] = cfi.set(!lock.is_ready(), order);
+			state.push(std::move(v), ParserInfo{
+				.operand_idx = info.operand_idx,
+				.operator_idx = op_idx
+			});
+		});
+
+		const auto total = cfi.get_chain() + sizeof(std::uint32_t);
+		if (cfi.get())
+		{
+			while (off != total)
+			{
+				const auto op = packet[off++];
+				if (op < _op_parse_table.size())
+				{
+					const auto func = _op_parse_table[op];
+					off += (this->*func)(packet.subspan(off), state, cfi, info);
+				}
+				else
+					break;
+			}
+		}
+		state.acquire();
+		core.launch(schema, [=, ctx = MemoryCache::origin(), &state, this](MemoryCache* cache) {
+			cache->unlock(key, sort, ctx);
+			state.release();
+		});
+
+		return total;
 	}
 	std::size_t Mount::_query_parse_op_barrier(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept
 	{
@@ -510,7 +616,7 @@ namespace rdb
 		{
 			ControlFlowInfo cfi;
 			const auto func = _op_parse_table[op];
-			return (this->*func)(packet.subspan(off), state, cfi, info);
+			return off + (this->*func)(packet.subspan(off), state, cfi, info);
 		}
 		return ~0ull;
 	}
@@ -522,26 +628,27 @@ namespace rdb
 		if (op == cmd::qOp::Reset)
 		{
 			state.acquire();
-			core.launch(Thread::task(schema, [=, &state, this](MemoryCache* cache) {
-				cache->reset(key, partition, sort);
+			core.launch(schema, [=, ctx = MemoryCache::origin(), &state, this](MemoryCache* cache) {
+				cache->reset(key, partition, sort, ctx);
 				state.release();
-			}));
+			});
 		}
 		else if (op == cmd::qOp::Write)
 		{
 			const auto len = byte::sread<std::uint32_t>(packet.data(), off);
 			state.acquire();
-			core.launch(Thread::task(schema, [=, &state, this](MemoryCache* cache) {
+			core.launch(schema, [=, ctx = MemoryCache::origin(), &state, this](MemoryCache* cache) {
 				cache->write(
 					WriteType::Field,
 					key, partition, sort,
 					packet.subspan(
 						off,
 						len + sizeof(std::uint8_t)
-					)
+					),
+					ctx
 				);
 				state.release();
-			}));
+			});
 			off += len + sizeof(std::uint8_t);
 		}
 		else if (op == cmd::qOp::Read)
@@ -561,7 +668,7 @@ namespace rdb
 			);
 
 			state.acquire();
-			core.launch(Thread::task(schema, [=, &state, this](MemoryCache* cache) {
+			core.launch(schema, [=, &state, this](MemoryCache* cache) {
 				std::size_t idx = 0;
 				cache->read(key, sort, fields, [&](std::size_t field, View data) {
 					state.push(View::copy(data), ParserInfo{
@@ -570,13 +677,13 @@ namespace rdb
 					});
 				});
 				state.release();
-			}));
+			});
 		}
 		else if (op == cmd::qOp::WProc)
 		{
 			const auto len = byte::sread<std::uint32_t>(packet.data(), off);
 			state.acquire();
-			core.launch(Thread::task(schema, [=, &state, this](MemoryCache* cache) {
+			core.launch(schema, [=, ctx = MemoryCache::origin(), &state, this](MemoryCache* cache) {
 				cache->write(
 					WriteType::WProc,
 					key, partition, sort,
@@ -585,10 +692,11 @@ namespace rdb
 						len +
 							sizeof(proc_opcode) +
 							sizeof(std::uint8_t)
-					)
+					),
+					ctx
 				);
 				state.release();
-			}));
+			});
 			off += len + sizeof(proc_opcode) + sizeof(std::uint8_t);
 		}
 		else if (op == cmd::qOp::RProc)
@@ -610,7 +718,7 @@ namespace rdb
 		{
 			const auto op_idx = info.operator_idx++;
 			state.acquire();
-			core.launch(Thread::task(schema, [=, order = cfi.order(), &cfi, &state, this](MemoryCache* cache) {
+			core.launch(schema, [=, order = cfi.order(), &cfi, &state, this](MemoryCache* cache) {
 				const auto result = cache->exists(key, sort);
 				auto v = View::copy(1);
 				v.mutate()[0] = cfi.set(result, order);
@@ -619,7 +727,7 @@ namespace rdb
 					.operator_idx = op_idx
 				});
 				state.release();
-			}));
+			});
 		}
 		else if (op == cmd::qOp::Invert)
 		{

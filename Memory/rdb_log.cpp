@@ -19,109 +19,48 @@ namespace rdb
 		{
 			auto& off = _shard_offset;
 			auto& shard = _smap;
-			if (shard.memory()[off] == char(WriteType::Reserved))
-			{
-				break;
-			}
-			else if (shard.memory()[off] == char(WriteType::Remov) ||
-					 shard.memory()[off] == char(WriteType::Reset))
-			{
-				const auto wtype = WriteType(shard.memory()[off]);
-				off += sizeof(WriteType);
-				const auto key = byte::sread<key_type>(shard.memory(), off);
-				if (const auto keys = schema.skeys())
-				{
-					std::size_t size = 0;
-					for (std::size_t i = 0; i < keys; i++)
-					{
-						RuntimeInterfaceReflection::RTII& info = schema.reflect_skey(0);
-						size += info.storage(&shard.memory()[off + size]);
-					}
 
-					callback(
-						wtype,
-						key,
-						View::view(shard.memory().subspan(
-							off, size
-						)),
-						nullptr
-					);
-					off += size;
-				}
-				else
-				{
-					callback(
-						wtype,
-						key,
-						nullptr,
-						nullptr
-					);
-				}
-			}
-			else if (shard.memory()[off] == char(WriteType::CreatePartition))
+			WriteType type = WriteType(shard.memory()[off++]);
+			key_type key = 0x00;
+			View data = nullptr;
+			View sort = nullptr;
+
+			if (type == WriteType::Reserved)
+				break;
+
+			if (type == WriteType::CreatePartition)
 			{
-				const auto wtype = WriteType(shard.memory()[off]);
-				off += sizeof(WriteType);
-				const auto key = byte::sread<key_type>(shard.memory(), off);
-				const auto length = byte::sread<std::uint32_t>(shard.memory(), off);
-				callback(
-					wtype,
-					key,
-					nullptr,
-					View::view(shard.memory().subspan(
-						off,
-						length
-					))
-				);
-				off += length;
+				key = schema.hash_partition(&shard.memory()[off]);
+				off += schema.partition_size(&shard.memory()[off]);
 			}
 			else
 			{
-				const auto wtype = WriteType(shard.memory()[off]);
-				off += sizeof(WriteType);
-				const auto key = byte::sread<key_type>(shard.memory(), off);
-				if (const auto keys = schema.skeys())
+				key = byte::sread<key_type>(shard.memory(), off);
+
+				// If true we have a sorting key to parse
+				const auto keys = schema.skeys();
+				if (keys && type != WriteType::Table)
 				{
 					std::size_t size = 0;
 					for (std::size_t i = 0; i < keys; i++)
 					{
-						RuntimeInterfaceReflection::RTII& info = schema.reflect_skey(0);
+						RuntimeInterfaceReflection::RTII& info = schema.reflect_skey(i);
 						size += info.storage(&shard.memory()[off + size]);
 					}
-					View skey = View::view(shard.memory().subspan(
-						off, size
-					));
-					off += size;
-
-					const auto length = byte::sread<std::uint32_t>(shard.memory(), off);
-					callback(
-						wtype,
-						key,
-						skey,
-						View::view(shard.memory().subspan(
-							off,
-							length
-						))
-					);
-					off += length;
+					sort = View::view(shard.memory().subspan(off, size));
 				}
-				else
+
+				// If true we have data to parse
+				if (type != WriteType::Remov &&
+					type != WriteType::Reset)
 				{
 					const auto length = byte::sread<std::uint32_t>(shard.memory(), off);
-					callback(
-						wtype,
-						key,
-						nullptr,
-						View::view(shard.memory().subspan(
-							off,
-							length
-						))
-					);
+					data = View::view(shard.memory().subspan(off, length));
 					off += length;
 				}
 			}
+			callback(type, key, sort, data);
 		}
-
 		_smap.unmap();
 	}
 
@@ -146,11 +85,29 @@ namespace rdb
 	}
 	void Log::log(WriteType type, key_type key, View sort, View data) noexcept
 	{
-		const auto req =
-			type == WriteType::CreatePartition ?
-				(data.size() + sizeof(type) + sizeof(key_type) + sizeof(std::uint32_t)) :
-				((data != nullptr ? data.data().size() + sizeof(std::uint32_t) : 0)
-				+ sizeof(type) + sizeof(key) + sort.size());
+		std::size_t req = 0;
+		if (type == WriteType::CreatePartition)
+		{
+			req =
+				sizeof(WriteType) +
+				data.size();
+		}
+		else if (data.empty())
+		{
+			req =
+				sizeof(WriteType) +
+				sizeof(key_type) +
+				sort.size();
+		}
+		else
+		{
+			req =
+				sizeof(WriteType) +
+				sizeof(key_type) +
+				sort.size() +
+				sizeof(std::uint32_t) +
+				data.size();
+		}
 
 		if (_current.empty() ||
 			req + _shard_offset > _smap.size())
@@ -168,29 +125,21 @@ namespace rdb
 			_shard_offset = 0;
 		}
 
-		// Each log includes
-		// 1. The type of the write
-		// 2. The partition key
-		// 3. The sort key
-		// 4. The length of the data
-		// 5. The data
-		// Sort key lengths are derived using RTSI and RTII
-		// In case a power failure occurs during a replay (or a flush) the new flush is discarded and the logs are still replayed
-		// If we need a new shard but we still have bytes left, we append a WriteType::Reserved (since it is 0 we do not explicitly do that)
-
-		const auto skey = byte::byteswap_for_storage<key_type>(key);
 		if (type == WriteType::CreatePartition)
 		{
-			const auto len = byte::byteswap_for_storage<std::uint32_t>(data.size());
-			_smap.write(_shard_offset + 1, std::array{
-				View::view(byte::tspan(skey)),
-				View::view(byte::tspan(len)),
-				data
-			});
+			_smap.write(_shard_offset + 1, data);
 		}
 		else
 		{
-			if (data != nullptr)
+			const auto skey = byte::byteswap_for_storage<key_type>(key);
+			if (data.empty())
+			{
+				_smap.write(_shard_offset + 1, std::array{
+					View::view(byte::tspan(skey)),
+					sort
+				});
+			}
+			else
 			{
 				const auto len = byte::byteswap_for_storage<std::uint32_t>(data.size());
 				_smap.write(_shard_offset + 1, std::array{
@@ -200,20 +149,13 @@ namespace rdb
 					data
 				});
 			}
-			else
-			{
-				_smap.write(_shard_offset + 1, std::array{
-					View::view(byte::tspan(skey)),
-					sort
-				});
-			}
 		}
 
 		// Separate into two writes to make sure the logs don't get corrupted during power failure
 		// By default logs are zero'ed (filled with WriteType::Reserved)
 		// So if power fails this block is just skipped
 
-		_smap.write(_shard_offset, char(type));
+		_smap.write(_shard_offset, static_cast<unsigned char>(type));
 		_shard_offset += req;
 	}
 	void Log::replay(std::function<void(WriteType, key_type, View, View)> callback) noexcept

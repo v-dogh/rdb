@@ -6,10 +6,10 @@
 #include <memory>
 #include <vector>
 #include <functional>
-#include <ConcurrentQueue/concurrentqueue.h>
 #include <rdb_memory.hpp>
 #include <rdb_root_config.hpp>
 #include <rdb_dsl.hpp>
+#include <rdb_task_ring.hpp>
 
 namespace rdb
 {
@@ -33,8 +33,8 @@ namespace rdb
 				schema_type, std::function<void(MemoryCache*)>
 			>;
 
-			std::unique_ptr<std::counting_semaphore<>> sem{};
-			moodycamel::ConcurrentQueue<task> queue{};
+			ct::TaskRing<task, 128> queue{};
+
 			bool stop{ false };
 			std::thread thread{};
 
@@ -42,15 +42,12 @@ namespace rdb
 			Thread(Thread&&) = default;
 			Thread(const Thread&) = delete;
 
-			static auto make_sem()
+			void launch(schema_type schema, std::function<void(MemoryCache*)> func) noexcept
 			{
-				return std::make_unique<std::counting_semaphore<>>(0);
-			}
-
-			void launch(task task) noexcept
-			{
-				queue.enqueue(std::move(task));
-				sem->release();
+				queue.enqueue(
+					std::move(schema),
+					std::move(func)
+				);
 			}
 		};
 		struct ControlFlowInfo
@@ -69,7 +66,7 @@ namespace rdb
 			ControlFlowInfo(const ControlFlowInfo&) = delete;
 			~ControlFlowInfo()
 			{
-				util::nano_wait(_order_ctr, _order_max, std::memory_order::relaxed);
+				util::nano_wait_for(_order_ctr, _order_max, std::memory_order::relaxed);
 			}
 
 			auto order() noexcept
@@ -79,7 +76,7 @@ namespace rdb
 			bool set(bool value, std::size_t order) noexcept
 			{
 				bool result;
-				util::nano_wait(_order_ctr, order, std::memory_order::relaxed);
+				util::nano_wait_for(_order_ctr, order, std::memory_order::relaxed);
 				_state = _filter(_state, value);
 				result = _state;
 				++_order_ctr;
@@ -88,13 +85,13 @@ namespace rdb
 			}
 			bool get() const noexcept
 			{
-				util::nano_wait(_order_ctr, _order_max, std::memory_order::relaxed);
+				util::nano_wait_for(_order_ctr, _order_max, std::memory_order::relaxed);
 				return _state;
 			}
 			void set_filter(bool(*filter)(bool, bool)) noexcept
 			{
 				const auto o = order();
-				util::nano_wait(_order_ctr, o, std::memory_order::relaxed);
+				util::nano_wait_for(_order_ctr, o, std::memory_order::relaxed);
 				_filter = filter;
 				++_order_ctr;
 				_order_ctr.notify_all();
@@ -145,7 +142,7 @@ namespace rdb
 			}
 			void wait() const noexcept
 			{
-				util::nano_wait(ref, 0ul, std::memory_order::relaxed);
+				util::nano_wait_for(ref, 0ul, std::memory_order::relaxed);
 			}
 			void acquire() noexcept
 			{
@@ -206,6 +203,8 @@ namespace rdb
 		std::size_t _query_parse_op_page_from(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept;
 		std::size_t _query_parse_op_check(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept;
 		std::size_t _query_parse_op_if(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept;
+		std::size_t _query_parse_op_atomic(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept;
+		std::size_t _query_parse_op_lock(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept;
 		std::size_t _query_parse_op_barrier(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept;
 
 		std::size_t _query_parse_operand(std::span<const unsigned char> packet, ParserState& state, ParserInfo info) noexcept;
@@ -220,6 +219,8 @@ namespace rdb
 			&Mount::_query_parse_op_page_from,
 			&Mount::_query_parse_op_check,
 			&Mount::_query_parse_op_if,
+			&Mount::_query_parse_op_atomic,
+			&Mount::_query_parse_op_lock,
 			&Mount::_query_parse_op_barrier
 		};
 	public:
@@ -251,29 +252,29 @@ namespace rdb
 		bool query_sync(std::span<const unsigned char> packet, QueryEngine::ReadChainStore::ptr store) noexcept;
 
 		template<typename Func>
-		auto run(schema_type schema, Func&& task) noexcept
+		void run(schema_type schema, Func&& task) noexcept
 		{
 			for (decltype(auto) it : _threads)
-				it.launch(Thread::task{ schema, task });
+				it.launch(schema, task);
 		}
 		template<typename Func>
-		auto run(std::size_t core, schema_type schema, Func&& task) noexcept
+		void run(std::size_t core, schema_type schema, Func&& task) noexcept
 		{
 			_threads[core]
-				.launch(Thread::task{ schema, task });
+				.launch(schema, task);
 		}
 
 		template<typename Schema, typename Func>
-		auto run(Func&& task) noexcept
+		void run(Func&& task) noexcept
 		{
 			for (decltype(auto) it : _threads)
-				it.launch(Thread::task{ Schema::ucode, task });
+				it.launch(Schema::ucode, task);
 		}
 		template<typename Schema, typename Func>
-		auto run(std::size_t core, Func&& task) noexcept
+		void run(std::size_t core, Func&& task) noexcept
 		{
 			_threads[core]
-				.launch(Thread::task{ Schema::ucode, task });
+				.launch(Schema::ucode, task);
 		}
 
 		Status status() const noexcept

@@ -41,6 +41,8 @@ namespace rdb
 			std::size_t max_descriptors{ 4096 };
 			// Maximum open mappings
 			std::size_t max_mappings{ 8192 };
+			// Maximum created locks (that possibly are expired)
+			std::size_t max_locks{ 128 };
 			// The ratio of compressed data to decompressed data below which we write a compressed block
 			float compression_ratio{ 0.9f };
 			// The average chance for a false positive in the partition bloom filter
@@ -56,10 +58,18 @@ namespace rdb
 		} cache;
 		struct Mount
 		{
+			enum class CPUProfile
+			{
+				OptimizeSpeed,
+				OptimizeUsage
+			};
+
 			// Number of cores for the database to distribute load
 			std::size_t cores{ std::thread::hardware_concurrency() };
 			// Whether to enable NUMA awareness
-			bool numa{ false };
+			bool numa{ true };
+			// Optimizes for chosen qualities when it comes to CPU usage
+			CPUProfile cpu_profile{ CPUProfile::OptimizeUsage };
 		} mnt;
 	};
 }

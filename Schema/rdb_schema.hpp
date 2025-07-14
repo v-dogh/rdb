@@ -608,20 +608,21 @@ namespace rdb
 		template<typename... Argv>
 		static constexpr auto mstorage(Argv&&... args) noexcept
 		{
-			std::size_t size = 0;
-			if constexpr (sizeof...(args))
+			if constexpr (sizeof...(Argv))
 			{
+				std::size_t size = 0;
 				([&]() {
-					size += Fields::interface::mstorage(args);
+					if constexpr (cmp::is_typed_view<std::decay_t<Argv>>::value)
+						size += args.size();
+					else
+						size += Fields::interface::mstorage(args);
 				}(), ...);
+				return size;
 			}
 			else
 			{
-				([&]() {
-					size += Fields::interface::mstorage();
-				}(), ...);
+				return (Fields::interface::mstorage() + ...);
 			}
-			return size;
 		}
 		template<typename... Argv>
 		static auto minline(std::span<unsigned char> data, Argv&&... args) noexcept
@@ -630,19 +631,27 @@ namespace rdb
 			if constexpr (sizeof...(args))
 			{
 				([&]() {
-					off += Fields::interface::minline(
-						data.subspan(off),
-						std::forward<Argv>(args)
-					);
+					if constexpr (cmp::is_typed_view<std::decay_t<Argv>>::value)
+					{
+						std::memcpy(
+							data.data() + off,
+							args.data().data(),
+							args.size()
+						);
+						off += args.size();
+					}
+					else
+					{
+						off += Fields::interface::minline(
+							data.subspan(off),
+							std::forward<Argv>(args)
+						);
+					}
 				}(), ...);
 			}
 			else
 			{
-				([&]() {
-					off += Fields::interface::minline(
-						data.subspan(off)
-					);
-				}(), ...);
+				((off += Fields::interface::minline(data.subspan(off))), ...);
 			}
 			return off;
 		}
@@ -789,96 +798,127 @@ namespace rdb
 			return std::min(size, view.size());
 		}
 
-		std::size_t apply_field_write(std::size_t idx, View data, std::size_t buffer) noexcept
+		std::size_t apply_field_write(std::size_t idx, View data, FieldWriteApplyState& state) noexcept
 		{
-			View f = field(idx);
-			const auto size = storage();
-			if (buffer != ~0ull)
+			if (state.internal_field_offset == ~0ull)
 			{
-				const auto req =
-					size +
-					(int(data.data().size()) - f.data().size());
-				if (buffer < req)
-					return req;
+				const auto fd = field(idx);
+				state.internal_field_offset = fd.data().data() - reinterpret_cast<const unsigned char*>(this);
+				state.internal_field_size = fd.size();
 			}
+			if (state.size == ~0ull)
+				state.size = storage();
+			View field = View::view(std::span(
+				reinterpret_cast<unsigned char*>(this) + state.internal_field_offset,
+				state.internal_field_size
+			));
 
-			const auto dest = f.mutate();
-			if (idx != sizeof...(Fields) - 1 && data.size() != f.size())
+			auto* fdata = field.mutate().data();
+			const auto diff = static_cast<int>(data.size()) - static_cast<int>(field.size());
+			const auto req = static_cast<std::size_t>(static_cast<int>(state.size) + diff);
+			if (state.capacity < req)
+				return req;
+
+			if (idx != sizeof...(Fields) - 1 && diff)
 			{
-				const auto src = dest.data() + dest.size();
-				const auto diff = int(data.data().size()) - dest.size();
-				const auto back =
-					size - (dest.data() - reinterpret_cast<unsigned char*>(this));
+				auto* src = fdata + field.size();
+				const auto back = state.size - (src - reinterpret_cast<unsigned char*>(this));
 				std::memmove(src + diff, src, back);
 			}
-			std::memcpy(dest.data(), data.data().data(), data.data().size());
+			std::memcpy(fdata, data.data().data(), data.size());
 
-			return buffer;
+			return req;
 		}
-		std::size_t apply_write(std::size_t idx, proc_opcode op, proc_param data, std::size_t buffer) noexcept
+		std::size_t apply_write(std::size_t idx, proc_opcode op, proc_param data, WriteProcApplyState& state) noexcept
 		{
 			RuntimeInterfaceReflection::RTII& info = reflect(idx);
-			View f = field(idx);
-			if (buffer != ~0ull)
+			if (state.internal_field_offset == ~0ull)
 			{
-				const auto type = info.wproc(
-					f.mutate().data(),
+				const auto fd = field(idx);
+				state.internal_field_offset = fd.data().data() - reinterpret_cast<const unsigned char*>(this);
+				state.internal_field_size = fd.size();
+			}
+			if (state.size == ~0ull)
+				state.size = storage();
+			View field = View::view(std::span(
+				reinterpret_cast<unsigned char*>(this) + state.internal_field_offset,
+				state.internal_field_size
+			));
+			auto* fdata = field.mutate().data();
+
+			std::size_t req = state.size;
+			if (state.internal_wproc_type == wproc_type::Reserved)
+			{
+				state.internal_wproc_type = wproc_type(info.wproc(
+					fdata,
 					op,
 					View::view(data),
 					wproc_query::Type
-				);
-				if (type == wproc_type::Dynamic)
+				));
+			}
+			if (state.internal_wproc_type == wproc_type::Dynamic)
+			{
+				if (state.internal_wproc_required_size == 0)
 				{
-					if (const auto req = info.wproc(
-							f.mutate().data(),
-							op,
-							View::view(data),
-							wproc_query::Storage
-						); req > buffer)
-					{
-						return req;
-					}
+					state.internal_wproc_required_size = info.wproc(
+						fdata,
+						op,
+						View::view(data),
+						wproc_query::Storage
+					);
+				}
+				const auto diff = static_cast<int>(state.internal_wproc_required_size) - static_cast<int>(data.size());
+				req = static_cast<std::size_t>(static_cast<int>(state.size) + diff);
+				if (state.capacity < req)
+				{
+					return req;
+				}
+				else if (idx != sizeof...(Fields) - 1 && diff)
+				{
+					const auto src = fdata + field.size();
+					const auto back = state.size - (src - reinterpret_cast<unsigned char*>(this));
+					std::memmove(src + diff, src, back);
 				}
 			}
 			info.wproc(
-				f.mutate().data(),
+				fdata,
 				op,
 				View::view(data),
 				wproc_query::Commit
 			);
-			return buffer;
+			return req;
 		}
 
 		template<cmp::ConstString Name>
-		std::size_t apply_field_write(TypedView<interface<Name>> data, std::size_t buffer) noexcept
+		std::size_t apply_field_write(FieldWriteApplyState& state, TypedView<interface<Name>> data) noexcept
 		{
 			return apply_field_write(
 				index_of<Name>(),
 				View::view(data.data()),
-				buffer
+				state
 			);
 		}
 		template<cmp::ConstString Name, interface<Name>::Op::w Op>
-		std::size_t apply_write(TypedView<typename interface<Name>::Op::template wtype<Op>::param> data, std::size_t buffer) noexcept
+		std::size_t apply_write(WriteProcApplyState& state, TypedView<typename interface<Name>::Op::template wtype<Op>::param> data) noexcept
 		{
 			return apply_write(
 				index_of<Name>(),
 				proc_opcode(Op),
 				View::view(data.data()),
-				buffer
+				state
 			);
 		}
 		template<cmp::ConstString Name, interface<Name>::Op::w Op, typename... Argv>
-		std::size_t apply_write(std::size_t buffer, Argv&&... args) noexcept
+		std::size_t apply_write(WriteProcApplyState& state, Argv&&... args) noexcept
 		{
 			const auto data = interface<Name>
 				::Op::template wtype<Op>
-				::param::make(std::forward<Argv>(args)...);
+				::make(std::forward<Argv>(args)...);
 			return apply_write(
 				index_of<Name>(),
 				proc_opcode(Op),
 				View::view(data.data()),
-				buffer
+				state
 			);
 		}
 
@@ -1008,8 +1048,8 @@ namespace rdb
 				[](const View& sort) { return Topology::mstorage_init_keys(sort); },
 				[](const void* ptr) { return static_cast<const Topology*>(ptr)->storage(); },
 
-				[](void* ptr, std::size_t i, const View& v, std::size_t b) { return static_cast<Topology*>(ptr)->apply_field_write(i, View::view(v), b); },
-				[](void* ptr, std::size_t i, proc_opcode o, const proc_param& p, std::size_t b) { return static_cast<Topology*>(ptr)->apply_write(i, o, p, b); },
+				[](void* ptr, std::size_t i, const View& v, FieldWriteApplyState& b) { return static_cast<Topology*>(ptr)->apply_field_write(i, View::view(v), b); },
+				[](void* ptr, std::size_t i, proc_opcode o, const proc_param& p, WriteProcApplyState& b) { return static_cast<Topology*>(ptr)->apply_write(i, o, p, b); },
 
 				[](const void* ptr, std::size_t i) { return static_cast<const Topology*>(ptr)->field(i); },
 				[](void* ptr, std::size_t i) { return static_cast<Topology*>(ptr)->field(i); },

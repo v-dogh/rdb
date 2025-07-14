@@ -91,23 +91,7 @@ namespace rdb::type
 		std::size_t _volume() const noexcept
 		{
 			if (_has_sbo())
-			{
-				const auto len = _size();
-				if constexpr (_is_dynamic)
-				{
-					std::size_t off = 0;
-					while (off < len)
-					{
-						auto ptr = _buffer(off);
-						off += ptr->storage();
-					}
-					return off;
-				}
-				else
-				{
-					return len * Type::static_storage();
-				}
-			}
+				return _sbo_max;
 			return byte::byteswap_for_storage(_std.volume & _volume_mask);
 		}
 		std::size_t _size() const noexcept
@@ -782,9 +766,16 @@ namespace rdb::type
 					if (opcode == Op::Push)
 					{
 						const auto req = _size() + arguments.size();
-						if (req <= _volume())
-							return _volume();
-						return req * 1.5;
+						if (req <= _volume() || req < _sbo_max)
+						{
+							if (_has_sbo() && req < _sbo_max)
+								return _volume();
+							return _total_volume();
+						}
+						else
+						{
+							return sizeof(BufferBase) + req * 1.5;
+						}
 					}
 					else if (opcode == Op::EraseIf)
 					{
