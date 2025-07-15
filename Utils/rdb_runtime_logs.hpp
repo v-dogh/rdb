@@ -33,10 +33,10 @@ namespace rdb::rs
 		Reserved,
 		// Fine grained information regarding more complex operations
 		Verbose,
-		// Used for debug messages
-		Debug,
 		// Regular information regarding the function of operations
 		Info,
+		// Used for debug messages
+		Debug,
 		// Module events (e.g. during loading or shutdown)
 		Module,
 		// Information that signals not an error but a possible misconfiguration or unintended effect
@@ -47,6 +47,9 @@ namespace rdb::rs
 		Critical,
 	};
 
+	std::string_view signal_to_str(int sig) noexcept;
+	std::string_view severity_to_str(Severity severity) noexcept;
+
 	class RuntimeLogSink
 	{
 	public:
@@ -54,6 +57,11 @@ namespace rdb::rs
 		virtual void accept(std::span<const unsigned char> buffer) noexcept {}
 	};
 	class ConsoleSink : public RuntimeLogSink
+	{
+	public:
+		virtual void accept(std::span<const unsigned char> buffer) noexcept override;
+	};
+	class ColoredConsoleSink : public RuntimeLogSink
 	{
 	public:
 		virtual void accept(std::span<const unsigned char> buffer) noexcept override;
@@ -98,8 +106,6 @@ namespace rdb::rs
 		static inline std::size_t _stacktrace(stacktrace_print& out) noexcept;
 		static void _signal_handler(int sig) noexcept;
 		static void _hook_signal() noexcept;
-		static std::string_view _signal_to_str(int) noexcept;
-		static std::string_view _severity_to_str(Severity severity) noexcept;
 	private:
 		Config _cfg{};
 		Mapper _logs{};

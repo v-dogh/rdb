@@ -147,7 +147,7 @@ int main()
 			.root = "/tmp/RDB"
 		}
 	);
-	mnt->logs()->sink<rdb::rs::ConsoleSink>();
+	mnt->logs()->sink<rdb::rs::ColoredConsoleSink>();
 	mnt->start();
 
 	const auto uid = rdb::uuid::uint128_t();

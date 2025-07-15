@@ -49,9 +49,73 @@ namespace rdb::rs
 		}
 	}
 
+	std::string_view signal_to_str(int sig) noexcept
+	{
+		switch (sig)
+		{
+			case SIGSEGV: return "SIGSEGV (Segmentation Fault)";
+			case SIGABRT: return "SIGABRT (Abort)";
+			case SIGFPE: return "SIGFPE (Floating Point Exception)";
+			case SIGILL: return "SIGILL (Illegal Instruction)";
+			case SIGBUS: return "SIGBUS (Bus Error)";
+			case SIGTERM: return "SIGTERM (Termination Request)";
+			case SIGINT: return "SIGINT (Exit)";
+			case SIGQUIT: return "SIGQUIT (Quit)";
+			default: return "Unknown signal";
+		}
+	}
+	std::string_view severity_to_str(Severity severity) noexcept
+	{
+		switch (severity)
+		{
+		case Severity::Info: return "Info";
+		case Severity::Verbose: return "Verbose";
+		case Severity::Warning: return "Warning";
+		case Severity::Error: return "Error";
+		case Severity::Critical: return "Critical";
+		case Severity::Module: return "Module";
+		case Severity::Reserved: return "Reserved";
+		case Severity::Debug: return "Debug";
+		default: return "Unknown";
+		};
+	}
+
 	void ConsoleSink::accept(std::span<const unsigned char> buffer) noexcept
 	{
 		std::clog << RuntimeLogs::print(buffer) << '\n';
+	}
+	void ColoredConsoleSink::accept(std::span<const unsigned char> buffer) noexcept
+	{
+		constexpr std::string_view reset = "\033[0m";
+		constexpr std::string_view slate_blue = "\033[38;2;75;0;130m";
+		constexpr std::string_view silver = "\033[38;2;192;192;192m";
+		constexpr std::string_view orange = "\033[38;2;255;165;0m";
+		constexpr std::string_view yellow = "\033[93m";
+		constexpr std::string_view olive = "\033[38;2;128;128;0m";
+		constexpr std::string_view red = "\033[91m";
+		constexpr std::string_view cyan = "\033[96m";
+		constexpr std::array<std::string_view, std::size_t(Severity::Critical)> table{
+			silver,
+			silver,
+			orange,
+			cyan,
+			yellow,
+			olive,
+			red
+		};
+
+		const auto entry = RuntimeLogs::decode(buffer);
+		const auto color = table[std::size_t(entry.severity) - 1];
+		std::clog << std::format(
+			"{1:}[{3:%D} - {3:%H}:{3:%M}:{3:%S}]{0:}({2:}{4:}{0:})<{2:}{5:}{0:}> : {2:}{6:}{0:}\n",
+			reset,
+			slate_blue,
+			color,
+			std::chrono::time_point_cast<std::chrono::seconds>(entry.timestamp),
+			severity_to_str(entry.severity),
+			entry.module,
+			entry.msg
+		);
 	}
 
 	std::shared_mutex global_logs_mtx{};
@@ -112,7 +176,7 @@ namespace rdb::rs
 		return std::format(
 			"[{0:%D} - {0:%H}:{0:%M}:{0:%S}]({1:})<{2:}> : {3:}",
 			std::chrono::time_point_cast<std::chrono::seconds>(entry.timestamp),
-			_severity_to_str(entry.severity),
+			severity_to_str(entry.severity),
 			entry.module,
 			entry.msg
 		);
@@ -181,7 +245,7 @@ namespace rdb::rs
 			stacktrace.begin(),
 			stacktrace.begin() + _stacktrace(stacktrace)
 		);
-		const auto signal = _signal_to_str(sig);
+		const auto signal = signal_to_str(sig);
 
 		const auto strace_view = View::view(byte::sspan(strace));
 		const auto edl_view = View::view(byte::sspan(std::string_view("\n")));
@@ -214,36 +278,6 @@ namespace rdb::rs
 			global_logs_prev_handlers[SIGQUIT] = signal(SIGQUIT, _signal_handler);
 			hooked.store(true, std::memory_order::release);
 		}
-	}
-	std::string_view RuntimeLogs::_signal_to_str(int sig) noexcept
-	{
-		switch (sig)
-		{
-			case SIGSEGV: return "SIGSEGV (Segmentation Fault)";
-			case SIGABRT: return "SIGABRT (Abort)";
-			case SIGFPE: return "SIGFPE (Floating Point Exception)";
-			case SIGILL: return "SIGILL (Illegal Instruction)";
-			case SIGBUS: return "SIGBUS (Bus Error)";
-			case SIGTERM: return "SIGTERM (Termination Request)";
-			case SIGINT: return "SIGINT (Exit)";
-			case SIGQUIT: return "SIGQUIT (Quit)";
-			default: return "Unknown signal";
-		}
-	}
-	std::string_view RuntimeLogs::_severity_to_str(Severity severity) noexcept
-	{
-		switch (severity)
-		{
-		case Severity::Info: return "Info";
-		case Severity::Verbose: return "Verbose";
-		case Severity::Warning: return "Warning";
-		case Severity::Error: return "Error";
-		case Severity::Critical: return "Critical";
-		case Severity::Module: return "Module";
-		case Severity::Reserved: return "Reserved";
-		case Severity::Debug: return "Debug";
-		default: return "Unknown";
-		};
 	}
 
 	std::size_t RuntimeLogs::_log_size() const noexcept
