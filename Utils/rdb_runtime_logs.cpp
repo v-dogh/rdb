@@ -93,7 +93,7 @@ namespace rdb::rs
 		constexpr std::string_view yellow = "\033[93m";
 		constexpr std::string_view olive = "\033[38;2;128;128;0m";
 		constexpr std::string_view red = "\033[91m";
-		constexpr std::string_view cyan = "\033[96m";
+		constexpr std::string_view cyan = "\033[38;2;0;159;159m";
 		constexpr std::array<std::string_view, std::size_t(Severity::Critical)> table{
 			silver,
 			silver,
@@ -334,18 +334,18 @@ namespace rdb::rs
 		const auto beg = size * (id % capacity);
 		auto off = beg;
 
-		_data.memory()[off++] = static_cast<unsigned char>(severity);
-		off += byte::swrite<std::uint64_t>(_data.memory(), off, id);
-		off += byte::swrite<std::uint64_t>(_data.memory(), off, timestamp);
-		_data.memory()[off++] = static_cast<std::uint8_t>(module.size());
-		off += byte::swrite(_data.memory(), off, byte::sspan(module));
-		off += byte::swrite<std::uint16_t>(_data.memory(), off, len);
-			   byte::swrite(_data.memory(), off, byte::sspan(msg).subspan(
+		_logs.memory()[off++] = static_cast<unsigned char>(severity);
+		off += byte::swrite<std::uint64_t>(_logs.memory(), off, id);
+		off += byte::swrite<std::uint64_t>(_logs.memory(), off, timestamp);
+		_logs.memory()[off++] = static_cast<std::uint8_t>(module.size());
+		off += byte::swrite(_logs.memory(), off, byte::sspan(module));
+		off += byte::swrite<std::uint16_t>(_logs.memory(), off, len);
+			   byte::swrite(_logs.memory(), off, byte::sspan(msg).subspan(
 					0, len
 				));
 
 		for (decltype(auto) it : _sinks)
-			it->accept(_data.memory().subspan(beg, off - beg));
+			it->accept(_logs.memory().subspan(beg, off - beg));
 	}
 
 	void RuntimeLogs::sync() noexcept

@@ -1,22 +1,59 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.21)
+project(RDB LANGUAGES CXX VERSION 0.1.0)
 
-project(RDB LANGUAGES CXX)
+###########
+# OPTIONS #
+###########
 
-include(ExternalProject)
+option(D2_SANITIZE_MEMORY "Enable memory sanitizer" OFF)
+option(D2_SANITIZE_THREAD "Enable thread sanitizer" OFF)
 
-set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
+set(D2_SANITIZER_FLAGS "")
+if(D2_SANITIZE_MEMORY AND D2_SANITIZE_THREAD)
+    message(FATAL_ERROR "ASAN and TSAN cannot be enabled together")
+endif()
+if(D2_SANITIZE_MEMORY)
+    list(APPEND D2_SANITIZER_FLAGS -fsanitize=memory -fsanitize-recover=memory)
+endif()
+if(D2_SANITIZE_THREAD)
+    list(APPEND D2_SANITIZER_FLAGS -fsanitize=thread)
+endif()
 
-# set(ASAN_FLAGS "-fsanitize=address -fno-omit-frame-pointer -g")
-# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${ASAN_FLAGS}")
-# set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${ASAN_FLAGS}")
+#########################
+# SUBLIBRARY PROPERTIES #
+#########################
 
+function(rdb_setup_target target)
+    target_compile_features   (${target} PUBLIC cxx_std_20)
+    target_include_directories(${target} PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/Utils>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/Memory>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/Schema>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/Query>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/Network>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/External>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/External/jemalloc/include>
+        $<INSTALL_INTERFACE:include>
+    )
+    if (D2_SANITIZE_MEMORY OR D2_SANITIZE_THREAD)
+        target_compile_options (${target} PUBLIC -fno-omit-frame-pointer ${D2_SANITIZER_FLAGS})
+        target_link_options    (${target} PUBLIC                         ${D2_SANITIZER_FLAGS})
+    endif()
+    if(CMAKE_INTERPROCEDURAL_OPTIMIZATION_SUPPORTED)
+        set_target_properties  (${target} PROPERTIES INTERPROCEDURAL_OPTIMIZATION ON)
+    endif()
+endfunction()
+
+#############
+# LIBRARIES #
+#############
+
+# Core library; includes memory and disk management, the mount point and network
 add_compile_definitions(RDB_RUNTIME_LOGS)
-add_subdirectory(External/Snappy)
-add_subdirectory(External/AbseilCpp)
 add_subdirectory(External/LibART)
-add_executable(RDB main.cpp
+add_subdirectory(External/Snappy)
+add_library(RDBCore STATIC
     # Core
 
     rdb_version.hpp
@@ -25,6 +62,7 @@ add_executable(RDB main.cpp
     rdb_containers.cpp
     rdb_mount.hpp
     rdb_mount.cpp
+    rdb_root_config.cpp
 
     # Query
 
@@ -38,6 +76,8 @@ add_executable(RDB main.cpp
     Memory/rdb_log.hpp
     Memory/rdb_log.cpp
     Memory/rdb_writetype.hpp
+    Memory/rdb_disk_cache.hpp
+    Memory/rdb_disk_cache.cpp
 
     # Schema
 
@@ -82,11 +122,10 @@ add_executable(RDB main.cpp
     Utils/rdb_runtime_logs.hpp
     Utils/rdb_runtime_logs.cpp
     Utils/rdb_dbg.hpp
+    Utils/rdb_meta.hpp
 )
 
-# Jemalloc
-
-set(JEMALLOC_SOURCE_DIR ${CMAKE_SOURCE_DIR}/External/jemalloc)
+set(JEMALLOC_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/External/jemalloc)
 
 ExternalProject_Add(JemallocProject
     SOURCE_DIR        ${JEMALLOC_SOURCE_DIR}
@@ -109,26 +148,42 @@ add_dependencies(jemalloc JemallocProject)
 
 # Dependencies
 
-target_link_libraries(RDB PRIVATE
-    jemalloc
+find_package(absl REQUIRED)
+
+target_link_libraries(RDBCore PRIVATE
     absl::base
     absl::flat_hash_map
     libart
     snappy
+    jemalloc
 )
+rdb_setup_target(RDBCore)
 
-target_include_directories(RDB PRIVATE
-    ${CMAKE_SOURCE_DIR}
-    ${CMAKE_SOURCE_DIR}/External
-    ${CMAKE_SOURCE_DIR}/Memory
-    ${CMAKE_SOURCE_DIR}/Query
-    ${CMAKE_SOURCE_DIR}/Schema
-    ${CMAKE_SOURCE_DIR}/Network
-    ${CMAKE_SOURCE_DIR}/Utils
-)
+######################
+# EXPORTED INTERFACE #
+######################
+
+add_library(RDB       INTERFACE)
+add_library(RDB::Core ALIAS RDB)
+
+target_link_libraries(RDB INTERFACE RDBCore)
 
 include(GNUInstallDirs)
-install(TARGETS RDB
+
+set(_install_targets RDBCore)
+install(TARGETS ${_install_targets} RDB
+    EXPORT  RDBTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+install(
+    DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/RDB
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+install(
+    EXPORT      RDBTargets
+    FILE        RDBTargets.cmake
+    NAMESPACE   RDB::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/RDB
 )

@@ -3,16 +3,23 @@
 
 namespace rdb
 {
-	enum class WriteType : char
-	{
-		Reserved,
-		Field,
-		Table,
-		WProc,
-		Remov,
-		Reset,
-		CreatePartition
-	};
+    enum class WriteType : char
+    {
+        Reserved,
+        Field,
+        Table,
+        WProc,
+        Remov,
+        Reset,
+        CreatePartition
+    };
+    enum class ReadType : char
+    {
+        Field,
+        Schema,
+        RProc,
+        Page
+    };
 }
 
 #endif // RDB_WRITETYPE_HPP
