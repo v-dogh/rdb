@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.21)
 project(RDB LANGUAGES CXX VERSION 0.1.0)
 
+include(ExternalProject)
+include(GNUInstallDirs)
+
 ###########
 # OPTIONS #
 ###########
@@ -97,6 +100,7 @@ add_library(RDBCore STATIC
     Schema/Types/rdb_bitset.hpp
     Schema/Types/rdb_array.hpp
     Schema/Types/rdb_nullable.hpp
+
     Schema/Types/rdb_array_iterator.hpp
     Schema/Types/rdb_trivial_helper.hpp
 
@@ -168,10 +172,8 @@ add_library(RDB::Core ALIAS RDB)
 
 target_link_libraries(RDB INTERFACE RDBCore)
 
-include(GNUInstallDirs)
-
 set(_install_targets RDBCore)
-install(TARGETS ${_install_targets} RDB
+install(TARGETS ${_install_targets} RDB libart
     EXPORT  RDBTargets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}

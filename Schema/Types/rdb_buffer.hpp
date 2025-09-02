@@ -49,10 +49,10 @@ namespace rdb::type
 			byte::byteswap_for_storage<std::uint64_t>(
 				~std::uint64_t(0) >> 1
 			);
-		static constexpr auto _sbo_tag =
-			std::uint8_t(0b10000000);
+        static constexpr auto _sbo_tag =
+            std::uint8_t(0b10000000);
 		static constexpr auto _sbo_mask =
-			std::uint8_t(0b01111111);
+            std::uint8_t(0b01111111);
 
 		union
 		{
@@ -71,9 +71,8 @@ namespace rdb::type
 		bool _has_sbo() const noexcept
 		{
 			if constexpr (_sbo_max)
-				return (_sbo.length & _sbo_tag) == _sbo_tag;
-			else
-				return false;
+                return (_sbo.length & _sbo_tag) == _sbo_tag;
+            return false;
 		}
 		bool _has_sbo(std::size_t size) const noexcept
 		{
@@ -116,7 +115,7 @@ namespace rdb::type
 		}
 		void _set_volume(std::size_t vol, std::size_t size = ~0ull) noexcept
 		{
-			if (size > _sbo_max)
+            if (size >= _sbo_max)
 			{
 				_std.volume = byte::byteswap_for_storage(vol);
 			}

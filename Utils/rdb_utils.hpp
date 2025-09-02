@@ -2,7 +2,6 @@
 #define RDB_UTILS_HPP
 
 #include <atomic>
-#include <bitset>
 #include <chrono>
 #include <cstring>
 #include <numeric>
@@ -737,7 +736,7 @@ namespace rdb
 		void bind_thread(std::size_t core) noexcept;
 
 		template<typename Type>
-		void nano_wait_for(const std::atomic<Type>& var, const Type& value, std::memory_order order = std::memory_order::acquire) noexcept
+        void nano_wait_for(const std::atomic<Type>& var, const Type& value, std::memory_order order = std::memory_order::seq_cst) noexcept
 		{
 			for (int i = 0; i < 1000; ++i)
 			{
@@ -746,42 +745,11 @@ namespace rdb
 				util::spinlock_yield();
 			}
 
-			auto expected = var.load(std::memory_order::acquire);
+            auto expected = var.load(order);
 			while (expected != value)
 			{
-				var.wait(expected, std::memory_order::acquire);
-				expected = var.load(std::memory_order::acquire);
-			}
-		}
-
-		template<std::size_t Count>
-		std::size_t bitset_first(const std::bitset<Count>& value) noexcept
-		{
-			std::size_t first = 0;
-			for (std::size_t i = 0; i < value.size(); i++)
-			{
-				if (value.test(i))
-					first = i;
-			}
-			return ~0ull;
-		}
-
-		template<std::size_t Count>
-		auto bitset_range(const std::bitset<Count>& value, std::size_t limit = 0) noexcept
-		{
-			std::size_t first = ~0ull;
-			for (std::size_t i = 0; i < limit; i++)
-			{
-				if (first != ~0ull)
-				{
-					if (!value.test(i))
-						return std::make_pair(first, i - 1);
-				}
-				else
-				{
-					if (value.test(i))
-						first = i;
-				}
+                var.wait(expected, order);
+                expected = var.load(order);
 			}
 		}
 

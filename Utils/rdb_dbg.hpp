@@ -7,8 +7,8 @@
 #include <iostream>
 #include <format>
 #include <source_location>
-#define RDB_MSG(_sev_, _mod_, ...) (this->_shared.logs->log(_sev_, #_mod_, __VA_ARGS__))
-#define RDB_WARN_IF(_cond_, _mod_, ...) ((_cond_) ? RDB_MSG(::rdb::rs::Severity::Warning, _mod_, __VA_ARGS__) : (*this->_shared.logs));
+#define RDB_MSG(_sev_, _mod_, ...) (this->_shared.logs->log(::rdb::rs::Severity::_sev_, #_mod_, __VA_ARGS__))
+#define RDB_WARN_IF(_cond_, _mod_, ...) ((_cond_) ? RDB_MSG(Warning, _mod_, __VA_ARGS__) : (*this->_shared.logs));
 #define RDB_ASSERT(_cond_, _mod_) ((_cond_) ? void() : \
 	(RDB_CRITICAL(_mod_, "Assertion failed:", \
 	std::source_location::current().file_name(), ":", \
@@ -20,12 +20,12 @@
 #define RDB_WARN_IF(...) (void());
 #define RDB_ASSERT(...) (void());
 #endif
-#define RDB_LOG(_mod_, ...) RDB_MSG(::rdb::rs::Severity::Info, _mod_, __VA_ARGS__);
-#define RDB_TRACE(_mod_, ...) RDB_MSG(::rdb::rs::Severity::Verbose, _mod_, __VA_ARGS__);
-#define RDB_WARN(_mod_, ...) RDB_MSG(::rdb::rs::Severity::Warning, _mod_, __VA_ARGS__);
-#define RDB_MODULE(_mod_, ...) RDB_MSG(::rdb::rs::Severity::Module, _mod_, __VA_ARGS__);
-#define RDB_DBG(_mod_, ...) RDB_MSG(::rdb::rs::Severity::Debug, _mod_, __VA_ARGS__);
-#define RDB_ERROR(_mod_, ...) RDB_MSG(::rdb::rs::Severity::Error, _mod_, __VA_ARGS__);
-#define RDB_CRITICAL(_mod_, ...) RDB_MSG(::rdb::rs::Severity::Critical, _mod_, __VA_ARGS__);
+#define RDB_LOG(_mod_, ...) RDB_MSG(Info, _mod_, __VA_ARGS__);
+#define RDB_TRACE(_mod_, ...) RDB_MSG(Verbose, _mod_, __VA_ARGS__);
+#define RDB_WARN(_mod_, ...) RDB_MSG(Warning, _mod_, __VA_ARGS__);
+#define RDB_MODULE(_mod_, ...) RDB_MSG(Module, _mod_, __VA_ARGS__);
+#define RDB_DBG(_mod_, ...) RDB_MSG(Debug, _mod_, __VA_ARGS__);
+#define RDB_ERROR(_mod_, ...) RDB_MSG(Error, _mod_, __VA_ARGS__);
+#define RDB_CRITICAL(_mod_, ...) RDB_MSG(Critical, _mod_, __VA_ARGS__);
 
 #endif // RDB_DBG_HPP

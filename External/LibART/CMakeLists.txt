@@ -1,11 +1,11 @@
 cmake_minimum_required(VERSION 3.16)
 project(libart LANGUAGES C)
 
-add_library(libart STATIC src/art.c)
+add_library(libart STATIC ${CMAKE_CURRENT_SOURCE_DIR}/src/art.c)
 
 target_include_directories(libart
     PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
 )
 
 target_compile_options(libart PRIVATE

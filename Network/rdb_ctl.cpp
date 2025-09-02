@@ -4,21 +4,9 @@ namespace rdb
 {
 	CTL::CTL(Mount::ptr mnt) : _mnt(mnt)
 	{
-		expose_procedure<word, variadic>("var.set", std::function([this](const word& name, const variadic& value) -> std::string {
-			const auto f = _variables.find(name);
-			if (f == _variables.end())
-				return std::format("Invalid variable: {}", name.substr());
-			f->second.first(value.args);
-			return "";
-		}));
-		expose_procedure<word>("var.get", std::function([this](const word& name) -> std::string {
-			const auto f = _variables.find(name);
-			if (f == _variables.end())
-				return std::format("Invalid variable: {}", name.substr());
-			return f->second.second();
-		}));
 		hook_mount();
 		hook_memory_cache();
+        hook_ctl();
 	}
 
 	void CTL::hook_mount() noexcept
@@ -120,6 +108,42 @@ namespace rdb
 			return str;
 		}));
 	}
+    void CTL::hook_ctl() noexcept
+    {
+        expose_procedure<word, variadic>("var.set", std::function([this](const word& name, const variadic& value) -> std::string {
+            const auto f = _variables.find(name);
+            if (f == _variables.end())
+                return std::format("Invalid variable: {}", name.substr());
+                    f->second.first(value.args);
+            return "";
+        }));
+        expose_procedure<word>("var.get", std::function([this](const word& name) -> std::string {
+            const auto f = _variables.find(name);
+            if (f == _variables.end())
+                return std::format("Invalid variable: {}", name.substr());
+            return f->second.second();
+        }));
+        expose_procedure("ctl.variables", std::function([this]() {
+            std::stringstream out;
+            for (decltype(auto) it : _variables)
+            {
+                out
+                    << it.first
+                    << '\n';
+            }
+            return out.str();
+        }));
+        expose_procedure("ctl.procedures", std::function([this]() {
+            std::stringstream out;
+            for (decltype(auto) it : _procedures)
+            {
+                out
+                    << it.first
+                    << '\n';
+            }
+            return out.str();
+        }));
+    }
 
 	std::string CTL::eval(std::string_view str) noexcept
 	{

@@ -44,6 +44,10 @@ namespace rdb
             PK_F = 1 << 1,
             PK_SK = 1 << 2,
         };
+        enum BlockFlags : unsigned char
+        {
+            Encrypted = 1 << 0,
+        };
 
         struct FlushHandle
         {
@@ -135,10 +139,10 @@ namespace rdb
             ct::hash_map<
             key_type,
             std::pair<
-            View,
-            partition_variant
+                View,
+                partition_variant
             >
-            >;
+        >;
 
         using lock_type = LockData*;
         using single_lock = LockData;
@@ -148,7 +152,7 @@ namespace rdb
             ct::hash_map<
             key_type,
             lock_partition_variant
-            >;
+        >;
     private:
         std::filesystem::path _path{};
         std::atomic<std::size_t> _flush_running{ 0 };
@@ -189,17 +193,13 @@ namespace rdb
         std::pair<std::size_t, MemoryCache::PartitionMetadata> _disk_read_partition_metadata(FlushHandle& handle) noexcept;
 
         std::size_t _read_entry_size_impl(const View& view, DataType type) noexcept;
-        std::size_t _read_entry_impl(const View& view, DataType type, field_bitmap& fields,
-                                     const read_callback& callback) noexcept;
-        std::size_t _read_cache_impl(write_store& map, key_type key, const View& sort, field_bitmap& fields,
-                                     const read_callback& callback) noexcept;
+        std::size_t _read_entry_impl(const View& view, DataType type, field_bitmap& fields, const read_callback& callback) noexcept;
+        std::size_t _read_cache_impl(write_store& map, key_type key, const View& sort, field_bitmap& fields, const read_callback& callback) noexcept;
 
         bool _read_impl(key_type key, const View& sort, field_bitmap fields, const read_callback& callback) noexcept;
 
-        std::tuple<std::size_t, View, View> _page_map(write_store::iterator map, key_type key, const View& sort,
-                std::size_t count) noexcept;
-        std::tuple<std::size_t, View, View> _page_disk(key_type key, const View& sort, std::size_t count,
-                FlushHandle& handle) noexcept;
+        std::tuple<std::size_t, View, View> _page_map(write_store::iterator map, key_type key, const View& sort, std::size_t count) noexcept;
+        std::tuple<std::size_t, View, View> _page_disk(key_type key, const View& sort, std::size_t count, FlushHandle& handle) noexcept;
 
         write_store::iterator _create_partition_log_if(write_store& map, key_type key, const View& partition) noexcept;
         write_store::iterator _create_partition_if(write_store& map, key_type key, const View& partition) noexcept;
@@ -209,11 +209,9 @@ namespace rdb
         slot _create_unsorted_slot(write_store::iterator partition, DataType vtype, std::size_t reserve);
         slot _create_slot(write_store::iterator partition, const View& sort, DataType vtype, std::size_t reserve);
 
-        slot _create_sorted_slot(write_store::iterator partition, const View& sort, DataType vtype,
-                                 std::span<const unsigned char> buffer);
+        slot _create_sorted_slot(write_store::iterator partition, const View& sort, DataType vtype, std::span<const unsigned char> buffer);
         slot _create_unsorted_slot(write_store::iterator partition, DataType vtype, std::span<const unsigned char> buffer);
-        slot _create_slot(write_store::iterator partition, const View& sort, DataType vtype,
-                          std::span<const unsigned char> buffer);
+        slot _create_slot(write_store::iterator partition, const View& sort, DataType vtype, std::span<const unsigned char> buffer);
 
         slot _find_sorted_slot(write_store::iterator partition, const View& sort);
         slot _find_unsorted_slot(write_store::iterator partition);
@@ -227,8 +225,7 @@ namespace rdb
         lock_type _emplace_unsorted_lock_if(lock_store::iterator partition);
         lock_type _emplace_lock_if(key_type key, const View& sort);
 
-        void _write_impl(write_store::iterator partition, WriteType type, const View& sort,
-                         std::span<const unsigned char> data) noexcept;
+        void _write_impl(write_store::iterator partition, WriteType type, const View& sort, std::span<const unsigned char> data) noexcept;
         void _reset_impl(write_store::iterator partition, const View& sort) noexcept;
         void _remove_impl(write_store::iterator partition, const View& sort) noexcept;
 
@@ -242,10 +239,8 @@ namespace rdb
         void _bloom_round_impl(key_type key, unsigned char* buffer, std::size_t space, std::size_t bits) noexcept;
 
         std::size_t _bloom_intra_partition_begin_impl(write_store::const_iterator partition, Mapper& bloom, int id) noexcept;
-        void _bloom_intra_partition_round_impl(write_store::const_iterator part, const View& key, std::size_t bits,
-                                               Mapper& bloom, int id) noexcept;
-        void _bloom_intra_partition_end_impl(write_store::const_iterator partition, std::size_t bits, Mapper& bloom,
-                                             int id) noexcept;
+        void _bloom_intra_partition_round_impl(write_store::const_iterator part, const View& key, std::size_t bits, Mapper& bloom, int id) noexcept;
+        void _bloom_intra_partition_end_impl(write_store::const_iterator partition, std::size_t bits, Mapper& bloom, int id) noexcept;
         void _data_impl(const write_store& map, Mapper& data, Mapper& indexer, Mapper& bloom, int id) noexcept;
 
         void _data_close_impl(Mapper& data) noexcept;
@@ -288,6 +283,7 @@ namespace rdb
         bool unlock(key_type key, const View& sort, Origin origin) noexcept;
         bool is_locked(key_type key, const View& sort, Origin origin) noexcept;
 
+        void sync() noexcept;
         void flush() noexcept;
         void clear() noexcept;
 

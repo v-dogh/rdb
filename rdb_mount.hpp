@@ -70,7 +70,7 @@ namespace rdb
             ControlFlowInfo(const ControlFlowInfo&) = delete;
             ~ControlFlowInfo()
             {
-                util::nano_wait_for(_order_ctr, _order_max, std::memory_order::relaxed);
+                util::nano_wait_for(_order_ctr, _order_max);
             }
 
             auto order() noexcept
@@ -80,7 +80,7 @@ namespace rdb
             bool set(bool value, std::size_t order) noexcept
             {
                 bool result;
-                util::nano_wait_for(_order_ctr, order, std::memory_order::relaxed);
+                util::nano_wait_for(_order_ctr, order);
                 _state = _filter(_state, value);
                 result = _state;
                 ++_order_ctr;
@@ -89,13 +89,13 @@ namespace rdb
             }
             bool get() const noexcept
             {
-                util::nano_wait_for(_order_ctr, _order_max, std::memory_order::relaxed);
+                util::nano_wait_for(_order_ctr, _order_max);
                 return _state;
             }
             void set_filter(bool(*filter)(bool, bool)) noexcept
             {
                 const auto o = order();
-                util::nano_wait_for(_order_ctr, o, std::memory_order::relaxed);
+                util::nano_wait_for(_order_ctr, o);
                 _filter = filter;
                 ++_order_ctr;
                 _order_ctr.notify_all();
@@ -147,7 +147,7 @@ namespace rdb
             }
             void wait() const noexcept
             {
-                util::nano_wait_for(ref, 0ul, std::memory_order::relaxed);
+                util::nano_wait_for(ref, 0ul);
             }
             void acquire() noexcept
             {
@@ -202,26 +202,16 @@ namespace rdb
         std::tuple<std::size_t, View> _query_parse_op_skey(std::span<const unsigned char> packet,
                 const RuntimeSchemaReflection::RTSI& inf, ParserState& state, ParserInfo info) noexcept;
 
-        std::size_t _query_parse_op_fetch(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi,
-                                          ParserInfo info) noexcept;
-        std::size_t _query_parse_op_create(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi,
-                                           ParserInfo info) noexcept;
-        std::size_t _query_parse_op_remove(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi,
-                                           ParserInfo info) noexcept;
-        std::size_t _query_parse_op_page(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi,
-                                         ParserInfo info) noexcept;
-        std::size_t _query_parse_op_page_from(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi,
-                                              ParserInfo info) noexcept;
-        std::size_t _query_parse_op_check(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi,
-                                          ParserInfo info) noexcept;
-        std::size_t _query_parse_op_if(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi,
-                                       ParserInfo info) noexcept;
-        std::size_t _query_parse_op_atomic(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi,
-                                           ParserInfo info) noexcept;
-        std::size_t _query_parse_op_lock(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi,
-                                         ParserInfo info) noexcept;
-        std::size_t _query_parse_op_barrier(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi,
-                                            ParserInfo info) noexcept;
+        std::size_t _query_parse_op_fetch(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept;
+        std::size_t _query_parse_op_create(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept;
+        std::size_t _query_parse_op_remove(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept;
+        std::size_t _query_parse_op_page(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept;
+        std::size_t _query_parse_op_page_from(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept;
+        std::size_t _query_parse_op_check(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept;
+        std::size_t _query_parse_op_if(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept;
+        std::size_t _query_parse_op_atomic(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept;
+        std::size_t _query_parse_op_lock(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept;
+        std::size_t _query_parse_op_barrier(std::span<const unsigned char> packet, ParserState& state, ControlFlowInfo& cfi, ParserInfo info) noexcept;
 
         std::size_t _query_parse_operand(std::span<const unsigned char> packet, ParserState& state, ParserInfo info) noexcept;
         std::size_t _query_parse_schema_operator(std::span<const unsigned char> packet, key_type key, View partition, View sort,

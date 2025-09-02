@@ -6,6 +6,7 @@
 #include <rdb_runtime_logs.hpp>
 #include <rdb_locale.hpp>
 #include <iostream>
+#include <bit>
 
 namespace rdb::rs
 {
@@ -92,9 +93,9 @@ namespace rdb::rs
 		constexpr std::string_view orange = "\033[38;2;255;165;0m";
 		constexpr std::string_view yellow = "\033[93m";
 		constexpr std::string_view olive = "\033[38;2;128;128;0m";
-		constexpr std::string_view red = "\033[91m";
+        constexpr std::string_view red = "\033[91m";
 		constexpr std::string_view cyan = "\033[38;2;0;159;159m";
-		constexpr std::array<std::string_view, std::size_t(Severity::Critical)> table{
+        constexpr std::array<std::string_view, std::countr_zero(static_cast<unsigned char>(Severity::Critical))> table{
 			silver,
 			silver,
 			orange,
@@ -105,7 +106,7 @@ namespace rdb::rs
 		};
 
 		const auto entry = RuntimeLogs::decode(buffer);
-		const auto color = table[std::size_t(entry.severity) - 1];
+        const auto color = table[std::countr_zero(static_cast<unsigned char>(entry.severity)) - 1];
 		std::clog << std::format(
 			"{1:}[{3:%D} - {3:%H}:{3:%M}:{3:%S}]{0:}({2:}{4:}{0:})<{2:}{5:}{0:}> : {2:}{6:}{0:}\n",
 			reset,
@@ -352,4 +353,8 @@ namespace rdb::rs
 	{
 
 	}
+    void RuntimeLogs::filter(Filter filter) noexcept
+    {
+        _filter = filter;
+    }
 }

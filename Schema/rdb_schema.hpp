@@ -387,11 +387,18 @@ namespace rdb
 			!std::is_same_v<void, typename SearchField<Field>::type>;
 
 		static constexpr auto has_static_prefix =
-			(Fields::interface::uproperty.is(InterfaceProperty::static_prefix) && ...);
+            ((Fields::type != FieldType::Sort ||
+              Fields::interface::uproperty.is(InterfaceProperty::static_prefix)) && ...);
 		static constexpr auto static_prefix_length =
 			[]() -> std::size_t {
-				if constexpr (has_static_prefix)
-					return (Fields::interface::static_prefix_length() + ...);
+                if constexpr (has_static_prefix)
+                {
+                    return ([]() -> std::size_t {
+                        if constexpr (Fields::type == FieldType::Sort)
+                            return Fields::interface::static_prefix_length();
+                        return 0;
+                    }() + ...);
+                }
 				return 0;
 			}();
 	private:

@@ -32,6 +32,7 @@ namespace rdb
 	public:
 		void hook_mount() noexcept;
 		void hook_memory_cache() noexcept;
+        void hook_ctl() noexcept;
 
 		static auto make(Mount::ptr mnt)
 		{

@@ -204,7 +204,11 @@ namespace rdb::type
 
 	template<std::size_t Count>
 	class Bitset :
-		public Interface<Bitset<Count>, cmp::concat_const_string<"bs", cmp::int_to_const_string<Count>()>()>,
+        public Interface<
+            Bitset<Count>,
+            cmp::concat_const_string<"bs", cmp::int_to_const_string<Count>()>(),
+            InterfaceProperty::static_prefix
+        >,
 		public InterfaceMake<Bitset<Count>>,
 		public InterfaceHelper<Bitset<Count>>
 	{

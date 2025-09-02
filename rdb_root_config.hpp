@@ -145,6 +145,24 @@ namespace rdb
     {
         // Root directory of the database
         std::filesystem::path root{ "/rdb/" };
+        struct Mount
+        {
+            enum class CPUProfile
+            {
+                OptimizeSpeed,
+                OptimizeUsage
+            };
+            static inline auto default_cores = std::thread::hardware_concurrency();
+
+            // Number of cores for the database to distribute load
+            std::size_t cores{ default_cores };
+            // Whether to enable NUMA awareness
+            bool numa{ true };
+            // Optimizes for chosen qualities when it comes to CPU usage
+            CPUProfile cpu_profile{ CPUProfile::OptimizeUsage };
+            // Runtime logs config
+            rs::RuntimeLogs::Config logs{};
+        } mnt;
         struct Logs
         {
             // The size of a single log shard (bytes)
@@ -165,10 +183,12 @@ namespace rdb
 
             // The block size during a flush
             std::size_t block_size{ mem::KiB(64) };
-            // The number entries to linearly scan after looking up a sparse index
-            std::size_t block_sparse_index_ratio{ 64 };
-            // The number entries to linearly scan after looking up a sparse index
-            std::size_t partition_sparse_index_ratio{ 32 };
+            // The number of partitions to linearly scan
+            std::size_t partition_sparse_index_ratio{ 4 };
+            // The number of blocks to linearly scan
+            std::size_t block_sparse_index_ratio{ 8 };
+            // The number of sorted values to linearly scan
+            std::size_t sort_sparse_index_ratio{ 16 };
             // Amount of data in the memory cache that triggers a flush (bytes)
             std::size_t flush_pressure{ mem::MiB(256) };
             // Automatic compaction fold ratio determines how many flushes fold into a single flush
@@ -184,9 +204,9 @@ namespace rdb
             // The ratio of compressed data to decompressed data below which we write a compressed block
             float compression_ratio{ 0.9f };
             // The average chance for a false positive in the partition bloom filter
-            float partition_bloom_fp_rate{ 0.01f };
+            float partition_bloom_fp_rate{ 0.001f };
             // The average chance for a false positive in the intra-partition bloom filter
-            float intra_partition_bloom_fp_rate{ 0.1f };
+            float intra_partition_bloom_fp_rate{ 0.01f };
             // Query cache type (trigerred when a disk read is performed)
             Type cache_type{ Type::ALC };
             // Maximum allowed memory usage of the cache (bytes) (only considers data stored, not the total memory used by structures)
@@ -196,24 +216,6 @@ namespace rdb
             // Whether page requests should be cached
             bool cache_page{ false };
         } cache;
-        struct Mount
-        {
-            enum class CPUProfile
-            {
-                OptimizeSpeed,
-                OptimizeUsage
-            };
-            static inline auto default_cores = std::thread::hardware_concurrency();
-
-            // Number of cores for the database to distribute load
-            std::size_t cores{ default_cores };
-            // Whether to enable NUMA awareness
-            bool numa{ true };
-            // Optimizes for chosen qualities when it comes to CPU usage
-            CPUProfile cpu_profile{ CPUProfile::OptimizeUsage };
-            // Runtime logs config
-            rs::RuntimeLogs::Config logs;
-        } mnt;
     };
     struct Shared
     {

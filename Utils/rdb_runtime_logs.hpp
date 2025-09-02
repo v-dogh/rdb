@@ -30,21 +30,30 @@ namespace rdb::rs
 
     enum class Severity : unsigned char
     {
-        Reserved,
+        Reserved = 1 << 0,
         // Fine grained information regarding more complex operations
-        Verbose,
+        Verbose = 1 << 1,
         // Regular information regarding the function of operations
-        Info,
+        Info = 1 << 2,
         // Used for debug messages
-        Debug,
+        Debug = 1 << 3,
         // Module events (e.g. during loading or shutdown)
-        Module,
+        Module = 1 << 4,
         // Information that signals not an error but a possible misconfiguration or unintended effect
-        Warning,
+        Warning = 1 << 5,
         // A controlled error during the lifetime of an operation
-        Error,
+        Error = 1 << 6,
         // An uncontrolled error during the lifetime of an operation (e.g. an out of memory exception)
-        Critical,
+        Critical = 1 << 7,
+    };
+    enum class Filter : unsigned char
+    {
+        // Filters to only output
+        Important = unsigned(Severity::Verbose) | unsigned(Severity::Info),
+        // Filters to discard verbose output
+        Info = unsigned(Severity::Verbose),
+        // Clears all filters
+        Clear = 0x00
     };
 
     std::string_view signal_to_str(int sig) noexcept;
@@ -106,7 +115,7 @@ namespace rdb::rs
         static inline std::size_t _stacktrace(stacktrace_print& out) noexcept;
         static void _signal_handler(int sig) noexcept;
         static void _hook_signal() noexcept;
-    private:
+    private:        
         Config _cfg{};
         Mapper _logs{};
         Mapper _data{};
@@ -119,10 +128,11 @@ namespace rdb::rs
 
         std::vector<std::unique_ptr<RuntimeLogSink>> _sinks{};
 
+        std::atomic<Filter> _filter{ Filter::Clear };
+
         std::size_t _log_size() const noexcept;
         std::size_t _log_capacity() const noexcept;
-        void _log(Severity severity, std::string_view module, std::span<const unsigned char> data,
-                  std::span<const unsigned char> msg) noexcept;
+        void _log(Severity severity, std::string_view module, std::span<const unsigned char> data, std::span<const unsigned char> msg) noexcept;
 
         explicit RuntimeLogs(Config cfg);
         RuntimeLogs() : RuntimeLogs(Config{}) {}
@@ -138,6 +148,7 @@ namespace rdb::rs
         }
 
         void sync() noexcept;
+        void filter(Filter filter) noexcept;
 
         template<typename Type, typename... Argv>
         Type& sink(Argv&&... args)
@@ -155,14 +166,17 @@ namespace rdb::rs
             thread_local impl::LogStream stream(buffer);
             thread_local std::ostream out(&stream);
 
-            (out <<  ... << std::forward<Argv>(args));
+            if (!(unsigned(severity) & unsigned(_filter.load())))
+            {
+                (out <<  ... << std::forward<Argv>(args));
 
-            _log(severity, module, std::span<const unsigned char>(
-                     reinterpret_cast<const unsigned char*>(data.data()),
-                     data.size()
-                 ), stream.buffer());
+                _log(severity, module, std::span<const unsigned char>(
+                    reinterpret_cast<const unsigned char*>(data.data()),
+                    data.size()
+                ), stream.buffer());
 
-            stream.reset();
+                stream.reset();
+            }
 
             return *this;
         }

@@ -52,14 +52,15 @@ namespace rdb::ct
             _available.release();
             return true;
         }
-        bool _dequeue_impl(Type& value) noexcept
+        std::size_t _dequeue_impl(Type& value) noexcept
         {
             std::size_t tail = _tail.load();
-            if (_head_check.load() <= tail)
-                return false;
+            if (const auto head = _head_check.load();
+                head <= tail)
+                return head;
             value = std::move(_ring[tail & _mask]);
             _tail.fetch_add(1);
-            return true;
+            return 0;
         }
     public:
         TaskRing() = default;
@@ -79,12 +80,13 @@ namespace rdb::ct
 
         bool try_dequeue(Type& value) noexcept
         {
-            return _dequeue_impl(value);
+            return !_dequeue_impl(value);
         }
         bool dequeue(Type& value) noexcept
         {
-            while (!_dequeue_impl(value))
-                _head_check.wait(_head_check);
+            std::size_t head = 0;
+            while ((head = _dequeue_impl(value)))
+                _head_check.wait(head);
             return true;
         }
         bool dequeue(Type& value, std::chrono::microseconds max) noexcept
@@ -96,7 +98,7 @@ namespace rdb::ct
                         !_available.try_acquire_for(max))
                     return false;
             }
-            while (!_dequeue_impl(value));
+            while (_dequeue_impl(value));
             return true;
         }
 

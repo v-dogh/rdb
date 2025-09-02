@@ -41,7 +41,7 @@ namespace rdb
 
     void Mount::_core_impl(std::size_t core)
     {
-        const auto path = _shared.cfg->root/std::format("vcpu{}", core);
+        const auto path = _shared.cfg->root/std::format("C{}", core);
         if (!std::filesystem::exists(path))
         {
             std::filesystem::create_directory(path);
@@ -117,12 +117,12 @@ namespace rdb
 
     void Mount::start()
     {
-        RDB_LOG(mnt, "Attempting to start")
+        RDB_MODULE(mnt, "Attempting to start")
 
         std::lock_guard lock(_mtx);
         if (_status == Status::Running)
         {
-            RDB_LOG(mnt, "Attempting to stop");
+            RDB_MODULE(mnt, "Attempting to stop");
             for (decltype(auto) it : _threads)
             {
                 it.stop = true;
@@ -131,7 +131,7 @@ namespace rdb
             }
             _threads.clear();
             _status = Status::Stopped;
-            RDB_LOG(mnt, "Attempting to restart");
+            RDB_MODULE(mnt, "Attempting to restart");
         }
 
         std::filesystem::create_directory(_shared.cfg->root);
@@ -143,9 +143,10 @@ namespace rdb
         {
             _threads[i].thread = std::thread([this, i]()
             {
-                RDB_LOG(mnt, "Starting core", i);
+                RDB_MODULE(mnt, "Starting C", i);
                 events()->trigger<Event::CoreStart>(i);
                 _core_impl(i);
+                RDB_MODULE(mnt, "Stopping C", i)
             });
         }
 
@@ -153,7 +154,7 @@ namespace rdb
     }
     void Mount::stop() noexcept
     {
-        RDB_LOG(mnt, "Attempting to stop");
+        RDB_MODULE(mnt, "Attempting to stop");
         {
             std::lock_guard lock(_mtx);
             std::size_t i = 0;
@@ -297,7 +298,7 @@ namespace rdb
         ParserState state(&resource, std::move(store));
         ParserInfo inf{};
 
-        RDB_LOG(mnt, "Received query ", packet.size(), "b")
+        RDB_TRACE(mnt, "Received query ", packet.size(), "b")
 
         std::size_t off = 0;
         while (packet.size() >= off + 2)
@@ -306,10 +307,10 @@ namespace rdb
             if (flags & QueryEngine::OperandFlags::Reads)
                 inf.operand_idx++;
             off += _query_parse_operand(
-                       packet.subspan(off),
-                       state,
-                       inf
-                   );
+                packet.subspan(off),
+                state,
+                inf
+            );
         }
         state.wait();
         for (decltype(auto) it : state.response)
@@ -413,11 +414,11 @@ namespace rdb
         auto& core = _threads[_vcpu(key)];
 
         View data = View::view(
-                        packet.subspan(
-                            off,
-                            inf->storage(packet.data() + off)
-                        )
-                    );
+            packet.subspan(
+                off,
+                inf->storage(packet.data() + off)
+            )
+        );
         off += data.size();
 
         state.acquire();
